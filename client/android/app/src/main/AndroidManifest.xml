@@ -1,0 +1,83 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"/>
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+  <uses-permission android:name="android.permission.VIBRATE"/>
+  <uses-permission android:name="android.permission.WAKE_LOCK"/>
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+  <!-- Stage 8: nightly profile rebuild kicker. SCHEDULE_EXACT_ALARM is
+       "normal" on Android ≤11 and runtime-prompted on 12+; we degrade
+       gracefully via setAndAllowWhileIdle when not granted. -->
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+  <!-- Stage 3b: Activity Recognition + Sleep API -->
+  <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+  <!-- Stage 3c: Geofencing -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+  <!-- Stage 3d: Health Connect — explicit READ permissions per data type -->
+  <uses-permission android:name="android.permission.health.READ_STEPS"/>
+  <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
+  <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED"/>
+  <uses-permission android:name="android.permission.health.READ_EXERCISE"/>
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.VIEW"/>
+      <category android:name="android.intent.category.BROWSABLE"/>
+      <data android:scheme="https"/>
+    </intent>
+    <!-- Health Connect rationale activity discovery -->
+    <package android:name="com.google.android.apps.healthdata"/>
+    <intent>
+      <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE"/>
+    </intent>
+  </queries>
+  <application android:name=".MainApplication" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round" android:allowBackup="true" android:theme="@style/AppTheme" android:supportsRtl="true" android:enableOnBackInvokedCallback="false">
+    <meta-data android:name="expo.modules.updates.ENABLED" android:value="false"/>
+    <meta-data android:name="expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH" android:value="ALWAYS"/>
+    <meta-data android:name="expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS" android:value="0"/>
+    <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="portrait">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN"/>
+        <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+      <!-- Health Connect: rationale activity surface (required to be granted permissions) -->
+      <intent-filter>
+        <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE"/>
+      </intent-filter>
+    </activity>
+    <service
+      android:name=".LifeOsForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync"/>
+    <!-- Stage 3c: NotificationListenerService -->
+    <service
+      android:name=".LifeOsNotificationListener"
+      android:label="Life OS notification listener"
+      android:exported="true"
+      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+      <intent-filter>
+        <action android:name="android.service.notification.NotificationListenerService"/>
+      </intent-filter>
+    </service>
+    <receiver
+      android:name=".BootReceiver"
+      android:exported="true"
+      android:enabled="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED"/>
+      </intent-filter>
+    </receiver>
+    <!-- Stage 3b/3c: PendingIntent broadcast targets -->
+    <receiver android:name=".ActivityTransitionReceiver" android:exported="false"/>
+    <receiver android:name=".SleepReceiver" android:exported="false"/>
+    <receiver android:name=".GeofenceReceiver" android:exported="false"/>
+    <!-- Stage 8: daily 03:05 kicker -->
+    <receiver android:name=".NightlyAlarmReceiver" android:exported="false"/>
+  </application>
+</manifest>
