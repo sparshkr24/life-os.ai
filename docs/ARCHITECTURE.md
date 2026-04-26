@@ -441,4 +441,497 @@ Every datum has a UI surface so the user can audit it:
 `server/`, FCM, Tailscale, OAuth, Postgres, Play Store, iOS, AccessibilityService,
 TFLite app classifier, MediaProjection screenshots, vector DB, RL bandits, on-device LLM (v1).
 
+---
+
+## 8. End-to-end execution flow (module by module)
+
+This section is the canonical "what runs where, and what feeds what". Read top
+to bottom — each module hands off to the next.
+
+```
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 1 · Collectors  (Kotlin, always-on)      │
+                │ ─────────────────────────────────────────────── │
+                │ UsageStats poll (60s)        → app_fg           │
+                │ ActivityRecognition (push)   → activity         │
+                │ Sleep API (segment only)     → sleep            │
+                │ Geofence (push)              → geo_enter/exit   │
+                │ NotificationListener (push)  → notif_post       │
+                │ HealthConnect poll (5 min)   → steps/active_min │
+                └────────────────────┬────────────────────────────┘
+                                     │ INSERT
+                                     ▼
+                            ┌──────────────────┐
+                            │   events table   │  (raw firehose)
+                            └────────┬─────────┘
+                                     │
+        every 15 min ────────────────┼──────────────────────────────
+                                     ▼
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 2 · Ingestion pipeline (JS)              │
+                │ client/src/ingest/cleanup.ts                    │
+                │ ─────────────────────────────────────────────── │
+                │ ① drop noise pkgs (android, launchers, …)       │
+                │ ② merge same-pkg sessions within 90 s           │
+                │ ③ drop sub-1s app_fg rows                       │
+                │ Bounded to last 24h. Idempotent.                │
+                └────────────────────┬────────────────────────────┘
+                                     ▼
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 3 · Daily rollup (JS)                    │
+                │ client/src/aggregator/rollup.ts                 │
+                │ rebuildDailyRollup(today)  + (yesterday)        │
+                └────────────────────┬────────────────────────────┘
+                                     ▼
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 4 · Productivity score (deterministic)   │
+                │ client/src/brain/productivityScore.ts           │
+                └────────────────────┬────────────────────────────┘
+                                     ▼
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 5 · Monthly fold (once per local day)    │
+                │ client/src/aggregator/monthlyFold.ts            │
+                └────────────────────┬────────────────────────────┘
+                                     ▼
+                                 (async branch)
+                  ┌──────────────────┴──────────────────┐
+                  ▼                                     ▼
+   ┌────────────────────────────┐       ┌────────────────────────────┐
+   │ MODULE 6a · Rule engine    │       │ MODULE 6b · Smart-nudge    │
+   │ every 60 s while open +    │       │ tick (gpt-4o-mini, 15 min) │
+   │ once per 15-min tick in bg │       │ cost-cap gated             │
+   │ pure if/else over rollup   │       │                            │
+   └─────────────┬──────────────┘       └─────────────┬──────────────┘
+                 │ writes                              │ writes
+                 ▼                                     ▼
+                              nudges_log
+                                   │
+                    once nightly 03:00 (AlarmManager)
+                                   ▼
+                ┌─────────────────────────────────────────────────┐
+                │ MODULE 7 · Behavior profile rebuild (Sonnet)    │
+                │ inputs: prior profile + last 30 daily_rollups + │
+                │         last 6 monthly_rollups + nudges_log     │
+                │         (with score_delta) + VERIFIED_FACTS     │
+                │ output: new behavior_profile row                │
+                └─────────────────────────────────────────────────┘
+```
+
+### Module 1 — Collectors
+
+Kotlin foreground service + receivers. Each one has **one job**: capture a raw
+signal and `INSERT` into `events`. No cross-row logic, no rollups. A small
+write-time denylist exists in Kotlin (`NOISE_PKGS` in `LifeOsForegroundService`)
+to keep the firehose tractable; everything else is left to Module 2.
+
+| Source              | Event kind     | Cadence               | Payload shape                                  |
+| ------------------- | -------------- | --------------------- | ---------------------------------------------- |
+| UsageStatsManager   | `app_fg`       | poll every 60 s       | `{pkg, start_ts, end_ts, duration_ms}`         |
+| ActivityRecognition | `activity`     | push (transitions)    | `{type, transition: enter/exit}`               |
+| Sleep API           | `sleep`        | push (once per night) | `{kind:"segment", start_ts, end_ts, status}`   |
+| Geofencing          | `geo_enter`/`geo_exit` | push           | `{place_id}`                                   |
+| NotificationListener| `notif_post`   | push                  | `{pkg, title, text}`                           |
+| HealthConnect       | `steps`/`active_min` | poll every 5 min| `{count, source}` / `{minutes, source}`        |
+
+**Why we only keep sleep `segment` events:** the Sleep API also fires
+`SleepClassifyEvent` every ~10 min (a probability sample). They have no
+duration, the rollup never reads them, and they flood the events table.
+`SleepReceiver` drops them at write time.
+
+### Module 2 — Ingestion pipeline
+
+`client/src/ingest/cleanup.ts` runs at the start of every aggregator tick,
+before rollups. It owns three rules today:
+
+1. **Noise-pkg purge** — drops `app_fg` rows whose `pkg` matches a noise
+   denylist (`android`, system UI, launchers, settings, etc). Catches OEM
+   variants that slip past Kotlin's write-time filter.
+2. **Adjacent-session merge** — walks the last 24h of `app_fg` rows in time
+   order; whenever two consecutive same-pkg rows are within 90 s, the later
+   row is folded into the earlier (extending `end_ts`/`duration_ms`) and
+   deleted. Patches over service restarts that reset Kotlin's in-memory dedup.
+3. **Short-session purge** — deletes `app_fg` rows with `duration_ms < 1 s`.
+   These are RESUMED/PAUSED storms (sub-activity nav, share sheet round-trips)
+   that survived merging.
+
+**Add new rules here, not in collectors.** Collectors stay dumb. The pipeline
+is the single source of truth for "what counts as noise".
+
+### Module 3 — Daily rollup
+
+`rebuildDailyRollup(date, tz)`. UPSERT into `daily_rollup`. Inputs are the
+clean events stream produced by Module 2.
+
+In plain English:
+
+- Window: `[localMidnight, nextLocalMidnight)`.
+- **App minutes**: bucket `app_fg` rows by pkg, sum `duration_ms`. Apply
+  `app_categories` to also bucket per category and per local hour.
+- **Sleep**: pick the longest `sleep` segment whose `end_ts` falls in
+  `[date − 12h, date + 14h]`. That window captures "the night that belongs to
+  this date" without grabbing a nap from yesterday.
+- **`wake_first_app`**: first `app_fg` after `sleep.end_ts` that is **not**
+  in `WAKE_NOISE_PKGS` (launchers, lock screen, alarm clocks, dialers).
+  These auto-fire and aren't a real choice.
+- **Places**: walk `geo_enter`/`geo_exit` in time order, accumulating the
+  open span per `place_id`. Carry over an open span from before midnight.
+- **Activity / steps / nudges / silences**: sum/count from the matching
+  event kinds. Silences come from `inferred_activity` rows written by
+  `classifySilences`.
+
+Cadence: every 15 min, for **today and yesterday**. Yesterday is rebuilt for a
+few hours after midnight so late-arriving events (sleep segments, HC steps)
+get folded in. After ~6 h post-midnight, no new data can land in yesterday's
+window, so the rebuild is a no-op — *that's* when yesterday is "frozen".
+
+### Module 4 — Productivity score
+
+`computeProductivityScore(date)`. Pure deterministic SQL over the row Module 3
+just wrote. Stored in `daily_rollup.productivity_score`. Re-runs every tick
+alongside the rollup; once yesterday's rollup stops changing, its score
+stops changing too.
+
+### Module 5 — Monthly fold
+
+`foldMonth(month)` runs at most once per local day, gated by
+`schema_meta.last_monthly_fold_date`. Folds the previous month's
+`daily_rollup` rows into one `monthly_rollup` row (top apps, sleep p50/p90,
+place hours, totals, avg productivity score). Idempotent — re-firing on the
+same day is cheap and produces the same row.
+
+### Module 6 — Notifications: two pathways
+
+There are **two** independent triggers writing to `nudges_log`. They never
+share a code path.
+
+**6a. Rule engine** — `client/src/rules/engine.ts`. Pure if/else over today's
+rollup + recent events. Runs every 60 s while the app is open and once per
+15-min aggregator tick when it isn't. Cheap, deterministic, offline. Each
+rule has a cooldown enforced via lookback in `nudges_log`. Example rules:
+
+- "Instagram > 60 min after 22:00 → level-2 nudge"
+- "first thing after wake is doomscroll within 60 s → level-1 nudge"
+- "at home 14:00–18:00, browsing > 90 min → level-3 nudge"
+
+`nudges_log.source = 'rule'`.
+
+**6b. Smart-nudge tick** — Stage 7. Every 15 min, after the aggregator
+finishes, gpt-4o-mini receives a compact context (today-so-far rollup,
+behavior_profile summary, last 24 h of `nudges_log`, current time + place)
+and decides whether **right now** is a meaningful moment. It can be
+predictive ("you usually fall into Instagram at 22:30 — set a 22:00 cutoff
+today?"). Hard-walled by `llm_calls` daily cost cap; if today is over $0.30
+the call short-circuits.
+
+`nudges_log.source = 'smart'`, with `llm_call_id` set.
+
+Both pathways call `fireNudgeNotification({level, title, body})`, which maps
+levels 1/2/3 to the `lifeos.silent` / `lifeos.headsup` / `lifeos.modal`
+channels (LOW / DEFAULT / MAX importance, escalating vibration).
+
+### Module 7 — Nightly behavior-profile rebuild (Sonnet)
+
+Stage 8. AlarmManager fires once around 03:00. Inputs:
+
+- previous `behavior_profile` row (priors)
+- last **30** `daily_rollup` rows
+- last **6** `monthly_rollup` rows
+- last 7 days of `nudges_log` rows, each enriched with `score_delta`
+  (next-day productivity score − baseline) so the model can see which nudges
+  actually helped vs. which annoyed
+- a `VERIFIED_FACTS` block of deterministic correlations
+  (e.g. `low_phone_night.score_delta = +0.12`) computed in
+  `client/src/brain/verifiedFacts.ts`
+
+Output: a new `behavior_profile` row. **The LLM narrates verified facts; it
+never invents numbers.** All correlations come from `VERIFIED_FACTS`.
+
+### What the LLM never sees
+
+- Raw `events` rows.
+- Anything not in a rollup or in `VERIFIED_FACTS`.
+
+### Cadences at a glance
+
+| Trigger              | Cadence                | Module(s) it runs       |
+| -------------------- | ---------------------- | ----------------------- |
+| Foreground service   | 60 s poll              | M1 (UsageStats, HC)     |
+| Aggregator tick      | every 15 min           | M2 → M3 → M4 → M5 → M6b |
+| Rule engine          | 60 s (fg) + 15 min (bg)| M6a                     |
+| Smart-nudge tick     | every 15 min (gated)   | M6b                     |
+| Nightly profile      | 03:00 once             | M7                      |
+
+*End of document.*
+
+---
+
+## 9. Stitch.ai design prompt (paste into stitch.ai)
+
+The block below is the canonical prompt used to generate the visual design
+system for the app. Treat it as a spec for the UI layer. When new screens are
+added, extend this section first, then design.
+
+````
+ROLE
+You are designing a sideload-only personal Android app called "Life OS". One
+user (the developer). No marketing, no onboarding pitch. The user opens the app
+to (a) glance at how today is going, (b) trust that the background tracking is
+healthy, (c) read what the AI thinks of them, and (d) configure permissions
+and API keys. The vibe is calm, data-rich, slightly nerdy, never gamified.
+
+DESIGN PRINCIPLES
+- Minimal but high information density. No empty hero sections, no "Welcome".
+- Typography does the heavy lifting. Color is functional, never decorative.
+- Every screen is glanceable in <2 seconds and drillable in <2 taps.
+- Numbers are first-class citizens — large, monospaced, high contrast.
+- Motion is restrained: 150–200 ms ease-out, no bouncy springs, no parallax.
+- Dark mode is the default (the user uses this app at night). Light mode
+  must look equally crafted, not an afterthought.
+- Mobile-first portrait. No tablet layouts.
+
+VISUAL LANGUAGE
+- Type scale: Inter (UI) + JetBrains Mono (numbers, raw data, code).
+- Corner radius: 16px cards, 12px buttons, 8px chips.
+- Spacing: 4 / 8 / 12 / 16 / 24 / 32 (no other values).
+- Color palette (dark):
+    bg            #0B0B0E     (almost-black, warm)
+    surface       #14141A
+    surface-2     #1C1C24
+    border        #25252F
+    text-1        #F5F5F7     (primary)
+    text-2        #A0A0AB     (secondary)
+    text-3        #6B6B76     (tertiary / disabled)
+    accent        #7C9CFF     (cool indigo, for primary actions)
+    success       #4ADE80
+    warning       #F5B35A
+    danger        #F87171
+    chart-grid    #25252F
+- Color palette (light): same hues, swap luminances. bg #FAFAFB,
+    surface #FFFFFF, text-1 #0F0F12, text-2 #5C5C66, text-3 #9090A0.
+- Iconography: Lucide icons, 1.5 px stroke. No custom illustrations.
+- No gradients on primary surfaces. One subtle gradient is allowed: the
+  "productivity ring" on Today.
+
+INSPIRATION (per surface, study these specifically)
+- Overall information hierarchy + typography:    Linear, Things 3
+- Today dashboard density + ring metric:         Apple Fitness, Bevel, Gentler Streak
+- Settings + permission rows:                    iOS Settings, 1Password
+- Raw events table (technical but readable):     Datadog logs UI, Stripe dashboard
+- Daily/monthly rollup as readable narrative:    Reflect notes, Oura "Daily summary"
+- Chat surface:                                  Claude.ai, Notion AI side panel
+- Nudges feed:                                   Linear inbox, Things 3 today list
+- Charts (sleep, app-time, productivity):        Apple Health, Bevel, Whoop
+- LLM call log (developer panel):                Vercel logs, OpenAI playground
+
+NAVIGATION SHELL
+Bottom tab bar, 4 visible tabs + an overflow ⋯ for the rest. Active tab uses
+text-1; inactive uses text-3. No tab badges except a single unread-nudge dot.
+Tabs (in order): Today · Insights · Chat · Settings · ⋯ {Events, Rollups,
+LLM, Nudges, Profile}. The overflow opens a sheet, not a drawer.
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 1 — TODAY (the only screen the user opens 90% of the time)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Apple Fitness rings + Linear's "Today" view + Oura's morning card.
+
+Layout (top → bottom):
+1. Header strip: "Today" + tiny weekday + date in text-2. Right side: a small
+   live "● tracking" pill that turns warning if the foreground service hasn't
+   ticked in >5 min, danger if >30 min.
+2. Productivity ring (large, ~180 px). The ring fills 0→100% based on
+   `daily_rollup.productivity_score`. Center: the score as a 2-digit integer
+   in JetBrains Mono, 56 px. Below it, a single phrase like "ahead of your
+   weekly median" or "below baseline" in text-2.
+3. 5 component chips under the ring (sleep, focus, wake, move, nudge). Each
+   chip = label + tiny sparkline of the last 7 days + delta vs. baseline.
+   Tap → drills to Insights pre-filtered to that metric.
+4. Three "what happened" cards stacked vertically, each ~96 px tall:
+   - Sleep card: bedtime → wake time, duration, sparkline of last 7 nights.
+   - Phone time card: top 3 apps with their minute totals + a tiny stacked
+     bar of category split (productive / neutral / unproductive).
+   - Place card: a horizontal time-strip showing where you were today
+     (home / office / gym / out) — like a thin Gantt chart.
+5. "Nudges today" section: max 3 most recent rows from `nudges_log`. Each
+   row: level dot (silent/heads-up/modal color), title, time, "Did it help?
+   👍 / 👎" pair on the right. Tap → expand reasoning.
+6. Footer "system" card (collapsed by default): aggregator last tick,
+   rules last tick, today's LLM spend, "Run aggregator now / rules now /
+   smart nudge now" debug buttons. Visually quieter than the rest.
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 2 — INSIGHTS (the daily / monthly rollup, human readable)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Reflect's daily review + Oura's "Daily summary" + Whoop's trends.
+
+Top: a segmented control "Day · Week · Month". Below it, a date picker that
+horizontally scrolls (Things 3 style — selected date in larger type). The
+content below re-renders for the selected window. **No raw JSON anywhere on
+this screen** — the rollup row is rendered as a story:
+
+For Day view:
+- Hero block: productivity score with a one-sentence narration generated
+  client-side from rollup numbers (e.g. "Strong focus block 09:30–12:10,
+  then 2h 14m of Instagram after dinner."). The narration is templated, not
+  LLM-written.
+- "How you spent your time": a horizontal stacked bar (24 h) showing
+  category blocks (sleep, productive, neutral, unproductive, away). Below
+  it, a list of top 5 apps with minute totals + category-tinted bar fill.
+- "Where you were": a place strip identical to the Today card but for the
+  selected day.
+- "Movement": steps + active minutes + a tiny line chart of the day's
+  hourly steps.
+- "Sleep": bedtime / wake / duration / a 7-day sleep-debt mini chart.
+- "Nudges fired today": same component as Today, but for the selected day.
+- Tiny "View raw JSON" link at the bottom for power-use debugging — opens
+  a modal with the rollup row JSON and a copy button.
+
+For Month view: a calendar heatmap of productivity_score (GitHub-contrib
+style, 7 rows × ~5 cols) at the top, then the same per-section breakdowns
+aggregated to monthly stats (median sleep, top apps for the month, hours
+at each place).
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 3 — CHAT (Claude tool-calling against local SQLite, Stage 9)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Claude.ai mobile + Notion AI side panel.
+
+- Full-screen, no bottom tab bar visible while typing.
+- Single thread (no thread list — one user, one phone).
+- Messages: user bubbles right-aligned in surface-2; assistant messages flat
+  on bg with a thin left accent bar in `accent`. Tool-calls render inline as
+  collapsible cards: header "ran SQL: top apps last 7 days" + a "show query"
+  expander revealing the SQL + result preview.
+- Input bar: rounded multi-line composer with a paper-plane send. Right of
+  the composer, a small cost meter "$0.0124 today" tappable → opens cost-cap
+  settings.
+- Empty state shows 4 starter chips: "Why was yesterday low?", "When do I
+  doomscroll most?", "Suggest a rule for late-night Instagram", "Compare
+  this week to last week." Tap to send.
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 4 — SETTINGS
+────────────────────────────────────────────────────────────────────────────
+Inspiration: iOS Settings + 1Password vault settings.
+
+Sectioned list with section headers in text-3 ALL-CAPS 11 px tracking 0.05em.
+
+Section 1 — TRACKING PERMISSIONS (the most important section)
+Each row = title + description in text-2 + a status pill on the right:
+  ● granted (success), ● not granted (warning), ● not available (text-3).
+Tapping a row deep-links to the relevant Android settings page.
+Rows: Usage Access · Activity Recognition · Location (foreground) ·
+Location (background) · Sleep API · Notification Listener · Health Connect ·
+Notifications. Above the section: a single "X of 8 granted" progress bar.
+
+Section 2 — API KEYS
+- Anthropic API key. If set, show "sk-ant-…••••3a2f" in a row with a
+  "Replace" button. If unset, show a single full-width input + "Save".
+- OpenAI API key. Same pattern.
+- Both fields are obscured by default with a tiny eye toggle.
+
+Section 3 — COST & LIMITS
+- Daily LLM cost cap: a row showing the current cap (e.g. "$0.30 / day")
+  and today's spend as a thin progress bar underneath. Tap → numeric pad
+  to edit.
+- Today's spend rendered as monospace dollars.
+
+Section 4 — DATA
+- Backup now (writes to Documents/lifeos-backup-YYYYMMDD.db).
+- Last backup: timestamp + size.
+- Retention: events 90d / llm_calls 30d / others forever (read-only display).
+- "Wipe local data" — destructive, requires hold-to-confirm.
+
+Section 5 — DEBUG
+- Foreground service status (alive / killed / last tick).
+- Aggregator status (registered / interval / last tick).
+- Reopen DB connection. Run aggregator now. Run rules now. Run smart nudge
+  now. Each = a quiet ghost button.
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 5 — EVENTS (raw event table, but human-readable)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Datadog logs UI + Stripe dashboard activity.
+
+- Top filter bar: kind multi-select chip group (app_fg / sleep / activity /
+  geo / notif / steps / inferred / nudge), date range, search text.
+- List rows (NOT a wide-grid table — too cramped on mobile). Each row:
+  • Left: a 28 px colored kind icon (Lucide). Color per kind, muted.
+  • Middle: a one-line summary FORMATTED FROM THE PAYLOAD, not raw JSON.
+    Examples (these are the canonical formats):
+      app_fg            → "Instagram · 14m 02s"   sub-line: "20:31 → 20:45"
+      sleep (segment)   → "Slept 7h 14m"          sub-line: "23:18 → 06:32"
+      geo_enter         → "Arrived at Office"     sub-line: "09:04"
+      geo_exit          → "Left Home"             sub-line: "08:41"
+      activity          → "Walking · 12 min"      sub-line: "started 17:02"
+      steps             → "1,204 steps"           sub-line: "Health Connect"
+      notif             → "WhatsApp"              sub-line: "3 notifications"
+      inferred_activity → "Focused work · 1h 45m" sub-line: "office · 0.75 conf"
+  • Right: relative time ("2m ago") in text-3 monospaced.
+- Tap a row → bottom sheet with the formatted summary up top and the raw
+  payload JSON in a syntax-highlighted code block (collapsed by default).
+- Pull to refresh. Infinite scroll with a footer "showing N of M events".
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 6 — NUDGES (history feed)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Linear inbox + Things 3.
+
+- Grouped by day (today / yesterday / earlier).
+- Each card: level dot + title (bold) + body in text-2 + a row of metadata
+  (source: rule/smart, time, "did it help?" reaction set).
+- Smart nudges show a "🪄 smart" tag and a tiny ⓘ that opens reasoning + a
+  collapsed "model said:" raw JSON.
+- Filter chip row at top: "All · Rule · Smart · Helpful · Annoying".
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 7 — LLM CALLS (developer panel)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Vercel logs + OpenAI playground request panel.
+
+- Top stat strip: today's spend / 30-day spend / cost cap / # calls today.
+- List rows: model badge (claude-sonnet / 4o-mini) + purpose (nightly / tick
+  / chat) + tokens-in/out + cost in monospace + latency + ✓ or ✗ status dot.
+- Tap → request/response viewer: side-by-side on landscape, stacked on
+  portrait. Both shown as JSON in code blocks. Copy buttons.
+
+────────────────────────────────────────────────────────────────────────────
+SCREEN 8 — PROFILE (the AI's model of the user)
+────────────────────────────────────────────────────────────────────────────
+Inspiration: Reflect's "About you" + Oura's readiness summary.
+
+- Hero: "AI's model of you" + last-rebuilt timestamp + "based on N days".
+- Sections rendered from `behavior_profile.data` JSON:
+  • Patterns it noticed (bullet list)
+  • Causal chains it inferred (visualized as connected pills A → B → C)
+  • Suggested rules (each with an "Add as rule" button)
+  • Verified facts block (read-only, the deterministic correlations)
+- All text comes from the LLM but is presented as the model's notes about
+  the user — second-person ("you tend to...") for warmth.
+
+────────────────────────────────────────────────────────────────────────────
+TOAST / TOUCH PATTERNS
+────────────────────────────────────────────────────────────────────────────
+- Toasts at top, slide-down 200 ms, dismiss after 2.5 s. Success = subtle
+  success-tinted border; error = danger border + persists until tapped.
+- Press states: 92% scale + 80% opacity, 100 ms.
+- Hold-to-confirm for destructive actions: 600 ms ring fills, then commits.
+- Numeric inputs use a custom keypad sheet, not the system keyboard.
+
+DELIVERABLES
+For each screen above, produce:
+1. High-fidelity mock in dark mode (1080 × 2400, 3x).
+2. The same in light mode.
+3. Empty states + loading skeletons (shimmer at 1.2 s loop).
+4. Permission-denied state for relevant screens.
+5. A single "design tokens" frame listing all colors, type styles, spacing,
+   radii, motion durations.
+
+CONSTRAINTS
+- Single user, no avatars, no profile pic, no social anything.
+- No login screen (sideload-only). First launch goes straight to Today
+  with permission prompts inline.
+- No marketing language anywhere — copy is precise and slightly dry.
+- No emojis in primary copy. (Inline reactions like 👍 / 👎 are allowed.)
+````
+
 *End of document.*

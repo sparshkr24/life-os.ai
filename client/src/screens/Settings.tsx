@@ -1,3 +1,18 @@
+/**
+ * Settings — sectioned card layout matching the design mock.
+ *
+ * Sections (top → bottom):
+ *   • PROFILE       — single-row entry that opens the Profile screen
+ *   • THEME
+ *   • TRACKING PERMISSIONS — delegated to <PermissionsCard />
+ *   • API KEYS      — Anthropic + OpenAI inline editors
+ *   • COST & LIMITS — daily cap with a fill bar showing today's spend
+ *   • DATA          — local storage size + retention sweeps placeholder
+ *   • SYSTEM DEBUG  — collector status + raw profile JSON toggle
+ *
+ * Profile detail is a separate screen reachable via `onOpenProfile`. We
+ * removed it from the bottom nav per user request.
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import {
@@ -7,31 +22,33 @@ import {
   setDailyCap,
   type SecureSnapshot,
 } from '../secure/keys';
-import { getProfile } from '../repos/observability';
+import { getProfile, todayLlmSpendUsd } from '../repos/observability';
 import type { BehaviorProfileRow } from '../db/schema';
 import { useTheme, THEME_NAMES } from '../theme';
 import { useToast } from '../toast';
-import { ActionButton, fmtTime, makeStyles, safeJson, useAsyncRunner } from './shared';
+import { ActionButton, fmtTime, makeStyles, useAsyncRunner } from './shared';
 import { PermissionsCard } from './PermissionsCard';
+import { SectionHeader, StatusDot } from './widgets';
 
-export function SettingsScreen() {
+export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void }) {
   const { theme, setTheme } = useTheme();
   const s = makeStyles(theme);
   const run = useAsyncRunner();
   const toast = useToast();
   const [snap, setSnap] = useState<SecureSnapshot | null>(null);
+  const [spend, setSpend] = useState(0);
   const [aIn, setAIn] = useState('');
   const [oIn, setOIn] = useState('');
   const [capIn, setCapIn] = useState('');
   const [profile, setProfile] = useState<BehaviorProfileRow | null>(null);
-  const [showRaw, setShowRaw] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const refresh = async () => {
     await run('settings load', async () => {
-      const [sn, p] = await Promise.all([loadSnapshot(), getProfile()]);
+      const [sn, p, sp] = await Promise.all([loadSnapshot(), getProfile(), todayLlmSpendUsd()]);
       setSnap(sn);
       setProfile(p);
+      setSpend(sp);
     });
   };
   useEffect(() => {
@@ -59,16 +76,49 @@ export function SettingsScreen() {
     }
   };
 
-  const summary = useMemo(() => {
+  const cap = snap?.dailyCapUsd ?? 0.3;
+  const spendPct = useMemo(() => Math.min(100, Math.round((spend / cap) * 100)), [spend, cap]);
+  const profileConfPct = useMemo(() => {
     if (!profile) return null;
-    const p = safeJson(profile.data);
-    return typeof p === 'object' && p !== null ? (p as Record<string, unknown>) : null;
+    try {
+      const obj = JSON.parse(profile.data) as Record<string, unknown>;
+      const c = typeof obj.confidence === 'number' ? obj.confidence : null;
+      return c == null ? null : Math.round(c * 100);
+    } catch {
+      return null;
+    }
   }, [profile]);
 
   return (
     <ScrollView contentContainerStyle={s.body}>
+      {/* PROFILE entry — opens the dedicated Profile screen. */}
+      <SectionHeader>Profile</SectionHeader>
+      <Pressable onPress={onOpenProfile}>
+        <View style={s.card}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.body2, { fontWeight: '700' }]}>Behavior profile</Text>
+              <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+                {profile
+                  ? `built ${fmtTime(profile.built_ts)} · ${profile.based_on_days}d${
+                      profileConfPct != null ? ` · ${profileConfPct}% conf` : ''
+                    }`
+                  : 'not built yet · runs nightly'}
+              </Text>
+            </View>
+            <Text style={[s.tdMono, { color: theme.accent, fontWeight: '700' }]}>View →</Text>
+          </View>
+        </View>
+      </Pressable>
+
+      {/* THEME */}
+      <SectionHeader>Theme</SectionHeader>
       <View style={s.card}>
-        <Text style={s.label}>Theme</Text>
         <View style={s.toolbar}>
           {THEME_NAMES.map((n) => (
             <Pressable
@@ -81,15 +131,19 @@ export function SettingsScreen() {
         </View>
       </View>
 
+      {/* TRACKING PERMISSIONS */}
+      <SectionHeader>Tracking permissions</SectionHeader>
       <PermissionsCard />
 
+      {/* API KEYS */}
+      <SectionHeader>API keys</SectionHeader>
       <View style={s.card}>
-        <Text style={s.label}>Anthropic API key (Sonnet)</Text>
-        <Text style={s.body2}>
-          {snap?.anthropicSet ? `set ${snap.anthropicTail}` : 'not set'}
+        <Text style={[s.body2, { fontWeight: '700' }]}>Anthropic (Sonnet)</Text>
+        <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+          {snap?.anthropicSet ? `set · ${snap.anthropicTail}` : 'not set'}
         </Text>
         <TextInput
-          placeholder="sk-ant-..."
+          placeholder="sk-ant-…"
           placeholderTextColor={theme.inputPlaceholder}
           value={aIn}
           onChangeText={setAIn}
@@ -98,12 +152,13 @@ export function SettingsScreen() {
           style={s.input}
         />
       </View>
-
       <View style={s.card}>
-        <Text style={s.label}>OpenAI API key (gpt-4o-mini)</Text>
-        <Text style={s.body2}>{snap?.openaiSet ? `set ${snap.openaiTail}` : 'not set'}</Text>
+        <Text style={[s.body2, { fontWeight: '700' }]}>OpenAI (gpt-4o-mini)</Text>
+        <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+          {snap?.openaiSet ? `set · ${snap.openaiTail}` : 'not set'}
+        </Text>
         <TextInput
-          placeholder="sk-..."
+          placeholder="sk-…"
           placeholderTextColor={theme.inputPlaceholder}
           value={oIn}
           onChangeText={setOIn}
@@ -113,11 +168,45 @@ export function SettingsScreen() {
         />
       </View>
 
+      {/* COST & LIMITS */}
+      <SectionHeader>Cost &amp; limits</SectionHeader>
       <View style={s.card}>
-        <Text style={s.label}>Daily LLM cost cap (USD)</Text>
-        <Text style={s.body2}>current: ${snap?.dailyCapUsd.toFixed(2) ?? '0.30'}</Text>
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+          }}>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.body2, { fontWeight: '700' }]}>Daily compute cap</Text>
+            <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+              resets at local midnight
+            </Text>
+          </View>
+          <Text style={[s.h2, { fontSize: 20 }]}>
+            ${spend.toFixed(3)}
+            <Text style={[s.body2, { color: theme.textMuted }]}> / ${cap.toFixed(2)}</Text>
+          </Text>
+        </View>
+        {/* spend fill bar */}
+        <View
+          style={{
+            marginTop: 10,
+            height: 6,
+            borderRadius: 3,
+            backgroundColor: theme.chipBg,
+            overflow: 'hidden',
+          }}>
+          <View
+            style={{
+              width: `${spendPct}%`,
+              height: '100%',
+              backgroundColor: spendPct >= 90 ? theme.err : spendPct >= 60 ? theme.warn : theme.ok,
+            }}
+          />
+        </View>
         <TextInput
-          placeholder="0.30"
+          placeholder={`new cap (current ${cap.toFixed(2)})`}
           placeholderTextColor={theme.inputPlaceholder}
           value={capIn}
           onChangeText={setCapIn}
@@ -126,44 +215,55 @@ export function SettingsScreen() {
         />
       </View>
 
-      <ActionButton onPress={onSave} loading={saving} label="Save" />
+      <ActionButton onPress={onSave} loading={saving} label="Save changes" />
 
+      {/* SYSTEM DEBUG */}
+      <SectionHeader>System debug</SectionHeader>
       <View style={s.card}>
-        <Text style={s.label}>Behavior profile</Text>
-        {!profile && <Text style={s.muted}>not built yet · runs nightly (Stage 8)</Text>}
-        {profile && summary && (
-          <>
-            <Text style={s.body2}>built {fmtTime(profile.built_ts)}</Text>
-            <Text style={s.muted}>
-              {profile.based_on_days} days · {profile.model} · confidence{' '}
-              {String(summary.confidence ?? '?')}
-            </Text>
-            <ProfileSection title="schedule" data={summary.schedule} />
-            <ProfileSection title="habits (good)" data={summary.habits_good} />
-            <ProfileSection title="habits (bad)" data={summary.habits_bad} />
-            <ProfileSection title="time wasters" data={summary.time_wasters} />
-            <ProfileSection title="predictions" data={summary.predictions} />
-            <ProfileSection title="deviations" data={summary.deviations} />
-            <ProfileSection title="self-eval" data={summary.model_self_eval} />
-            <Pressable onPress={() => setShowRaw((v) => !v)} style={s.btnGhost}>
-              <Text style={s.btnGhostText}>{showRaw ? 'hide' : 'show'} full JSON</Text>
-            </Pressable>
-            {showRaw && <Text style={s.tdMono}>{JSON.stringify(summary, null, 2)}</Text>}
-          </>
-        )}
+        <DebugRow
+          title="Service"
+          value={profile?.model ?? 'idle'}
+          dotColor={profile ? theme.ok : theme.warn}
+        />
+        <DebugRow
+          title="Last profile rebuild"
+          value={profile ? fmtTime(profile.built_ts) : 'never'}
+          dotColor={profile ? theme.ok : theme.textFaint}
+        />
+        <DebugRow
+          title="Profile sample size"
+          value={profile ? `${profile.based_on_days} days` : '—'}
+          dotColor={theme.info}
+        />
       </View>
     </ScrollView>
   );
 }
 
-function ProfileSection({ title, data }: { title: string; data: unknown }) {
+function DebugRow({
+  title,
+  value,
+  dotColor,
+}: {
+  title: string;
+  value: string;
+  dotColor: string;
+}) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
-  if (data == null) return null;
   return (
-    <View style={{ marginTop: 8 }}>
-      <Text style={s.subLabel}>{title}</Text>
-      <Text style={s.tdMono}>{JSON.stringify(data, null, 2)}</Text>
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: 6,
+      }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+        <StatusDot color={dotColor} size={7} />
+        <Text style={[s.body2, { color: theme.text }]}>{title}</Text>
+      </View>
+      <Text style={[s.tdMonoSm, { color: theme.textFaint }]}>{value}</Text>
     </View>
   );
 }

@@ -140,6 +140,41 @@ export async function listNudges(limit = 200): Promise<NudgeRow[]> {
   );
 }
 
+/**
+ * Manual user feedback on a nudge: 1 = thumbs up, -1 = thumbs down, null = clear.
+ * Independent of the LLM's automated `score_delta` analysis — this is the
+ * user's own opinion of whether the nudge was useful.
+ */
+export async function setNudgeUserHelpful(
+  id: number,
+  value: 1 | -1 | null,
+): Promise<void> {
+  await withDb((db) =>
+    db.runAsync('UPDATE nudges_log SET user_helpful = ? WHERE id = ?', [value, id]),
+  );
+}
+
+/** Most recent daily_rollup row (today, or whatever the latest is). */
+export async function getLatestDailyRollup(): Promise<DailyRollupRow | null> {
+  return withDb(async (db) => {
+    const r = await db.getFirstAsync<DailyRollupRow>(
+      'SELECT * FROM daily_rollup ORDER BY date DESC LIMIT 1',
+    );
+    return r ?? null;
+  });
+}
+
+/** Productivity scores for the last N days (oldest → newest), for sparklines. */
+export async function recentProductivityScores(days = 7): Promise<{ date: string; score: number | null }[]> {
+  return withDb(async (db) => {
+    const rows = await db.getAllAsync<{ date: string; productivity_score: number | null }>(
+      'SELECT date, productivity_score FROM daily_rollup ORDER BY date DESC LIMIT ?',
+      [days],
+    );
+    return rows.reverse().map((r) => ({ date: r.date, score: r.productivity_score }));
+  });
+}
+
 export async function getProfile(): Promise<BehaviorProfileRow | null> {
   return withDb(async (db) => {
     const r = await db.getFirstAsync<BehaviorProfileRow>('SELECT * FROM behavior_profile WHERE id = 1');

@@ -25,6 +25,7 @@ import {
   TodayScreen,
   ObservabilityScreen,
   ChatScreen,
+  ProfileScreen,
   SettingsScreen,
   type TabId,
 } from './src/screens';
@@ -137,10 +138,11 @@ function Shell() {
         {tab === 'today' && <TodayScreen onTab={setTab} />}
         {tab === 'observe' && <ObservabilityScreen />}
         {tab === 'chat' && <ChatScreen />}
-        {tab === 'settings' && <SettingsScreen />}
+        {tab === 'profile' && <ProfileScreen onBack={() => setTab('settings')} />}
+        {tab === 'settings' && <SettingsScreen onOpenProfile={() => setTab('profile')} />}
       </View>
 
-      <FloatingNav tab={tab} onTab={setTab} />
+      <FloatingNav tab={tab === 'profile' ? 'settings' : tab} onTab={setTab} />
 
       <StatusBar style={theme.statusBarStyle} />
     </View>
@@ -155,6 +157,8 @@ function tabSubtitle(t: TabId): string {
       return 'raw data · rollups · llm · nudges';
     case 'chat':
       return 'ask anything (stage 9)';
+    case 'profile':
+      return "the AI's model of you";
     case 'settings':
       return 'theme · keys · profile';
   }

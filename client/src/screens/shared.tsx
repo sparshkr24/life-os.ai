@@ -22,7 +22,7 @@ import type { EventRow } from '../db/schema';
 import { useTheme, type ThemeTokens } from '../theme';
 import { useToast } from '../toast';
 
-export type TabId = 'today' | 'observe' | 'chat' | 'settings';
+export type TabId = 'today' | 'observe' | 'chat' | 'profile' | 'settings';
 
 export const fmtTime = (ts: number): string => new Date(ts).toLocaleString();
 export const fmtTimeShort = (ts: number): string =>

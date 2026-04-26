@@ -3,5 +3,6 @@
 export { TodayScreen } from './Today';
 export { ObservabilityScreen } from './Observability';
 export { ChatScreen } from './Chat';
+export { ProfileScreen } from './Profile';
 export { SettingsScreen } from './Settings';
 export type { TabId } from './shared';

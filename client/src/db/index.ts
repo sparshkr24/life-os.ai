@@ -157,6 +157,7 @@ export async function migrate(): Promise<number> {
     await addColumnIfMissing(db, 'nudges_log', 'next_day_score', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'baseline_score', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'score_delta', 'REAL');
+    await addColumnIfMissing(db, 'nudges_log', 'user_helpful', 'INTEGER');
     if (currentVersion < SCHEMA_VERSION) {
       await db.runAsync(
         `INSERT INTO schema_meta (key, value) VALUES ('version', ?)

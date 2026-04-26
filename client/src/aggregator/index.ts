@@ -4,7 +4,7 @@
  * from the Today screen (debug button).
  *
  * Per tick:
- *   1. purgeShortAppFg            — drop sub-1s app_fg noise rows
+ *   1. cleanupRawEvents           — ingest pipeline (noise pkgs / merge / short)
  *   2. classifySilences(today)    — write/refresh inferred_activity events
  *   3. classifySilences(yesterday)— same, in case the day rolled over
  *   4. rebuildDailyRollup(today)  — incl. silence counts
@@ -12,12 +12,15 @@
  *   6. computeProductivityScore   — for both days
  *   7. once per UTC day: foldMonth(prev month) — cheap, idempotent
  */
-import { withDb, purgeShortAppFg } from '../db';
+import { withDb } from '../db';
+import { cleanupRawEvents } from '../ingest/cleanup';
 import { computeProductivityScore } from '../brain/productivityScore';
 import { rebuildDailyRollup } from './rollup';
 import { classifySilences } from './silence';
 import { foldMonth } from './monthlyFold';
 import { runRulesOnceFromBackground } from '../rules/worker';
+import { runSmartNudgeTick } from '../brain/smartNudge';
+import { maybeRunNightlyWatchdog } from '../brain/nightly';
 import { deviceTz, localDateStr, localMonthStr, prevDate } from './time';
 
 const META_KEY_LAST_FOLD = 'last_monthly_fold_date';
@@ -44,9 +47,10 @@ export async function runAggregatorTick(): Promise<TickReport> {
   const yesterday = prevDate(today);
 
   try {
+    // cleanupRawEvents opens its own withDb — keep it outside the main txn
+    // so a cleanup failure doesn't poison the rollup pass.
+    await cleanupRawEvents();
     return await withDb(async (db) => {
-      await purgeShortAppFg(db, 1000);
-
       const silToday = await classifySilences(db, today, tz);
       const silYest = await classifySilences(db, yesterday, tz);
 
@@ -67,6 +71,24 @@ export async function runAggregatorTick(): Promise<TickReport> {
       // Background rule eval — fires nudges even when the app is killed.
       // The 60s foreground loop covers active sessions.
       await runRulesOnceFromBackground();
+
+      // Stage 7: smart-nudge tick (gpt-4o-mini). Internally cost-cap +
+      // cooldown gated; never throws. Fire-and-forget from this tick's
+      // perspective — we await so its errors land in our log line, but a
+      // failure here doesn't fail the aggregator tick.
+      try {
+        await runSmartNudgeTick();
+      } catch (e) {
+        console.error('[aggregator] smart-nudge crashed:', e instanceof Error ? e.message : String(e));
+      }
+
+      // Stage 8: nightly profile rebuild watchdog. Runs Sonnet at most
+      // once per ~24h, only after 03:00 local. Cheap when not due.
+      try {
+        await maybeRunNightlyWatchdog();
+      } catch (e) {
+        console.error('[aggregator] nightly-watchdog crashed:', e instanceof Error ? e.message : String(e));
+      }
 
       const dt = Date.now() - t0;
       console.log(

@@ -11,6 +11,7 @@
  */
 import type * as SQLite from 'expo-sqlite';
 import { localDayStartMs, localHour, prevDate, nextDate } from './time';
+import { WAKE_NOISE_PKGS } from '../ingest/cleanup';
 import type { AppCategory } from '../db/schema';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -282,6 +283,10 @@ async function aggWakeFirstApp(
   dayEnd: number,
 ): Promise<{ firstApp: string | null; minAfterWake: number | null }> {
   const wakeTs = sleep.end_ts ?? dayStart;
+  // Skip launchers, lockscreen, alarm clocks, dialers — the user didn't
+  // *choose* these, they auto-fired. WAKE_NOISE_PKGS is the canonical list.
+  const denyList = [...WAKE_NOISE_PKGS];
+  const placeholders = denyList.map(() => '?').join(',');
   const r = await db.getFirstAsync<{ pkg: string; ts: number } | null>(
     `SELECT json_extract(payload, '$.pkg') AS pkg,
             CAST(json_extract(payload, '$.start_ts') AS INTEGER) AS ts
@@ -289,8 +294,9 @@ async function aggWakeFirstApp(
      WHERE kind = 'app_fg'
        AND CAST(json_extract(payload, '$.start_ts') AS INTEGER) >= ?
        AND CAST(json_extract(payload, '$.start_ts') AS INTEGER) <  ?
+       AND json_extract(payload, '$.pkg') NOT IN (${placeholders})
      ORDER BY ts ASC LIMIT 1`,
-    [wakeTs, dayEnd],
+    [wakeTs, dayEnd, ...denyList],
   );
   if (!r) return { firstApp: null, minAfterWake: null };
   const minAfter = sleep.end_ts ? Math.round((r.ts - sleep.end_ts) / 60_000) : null;

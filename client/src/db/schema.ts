@@ -17,6 +17,7 @@ export const SCHEMA_VERSION = 3;
  *  - nudges_log.baseline_score    REAL    (median over preceding 7 days)
  *  - nudges_log.score_delta       REAL    (next_day - baseline)
  *  - new EventKind values: 'inferred_activity', 'user_clarification'
+ *  - nudges_log.user_helpful  INTEGER  (1 = thumbs up, -1 = thumbs down, NULL = no manual feedback)
  * Applied by `migrate()` via PRAGMA table_info guarded ALTER TABLE.
  * No DROP, no RENAME — never.
  */
@@ -217,6 +218,8 @@ export interface NudgeRow {
   baseline_score: number | null;
   /** v3. next_day_score - baseline_score. */
   score_delta: number | null;
+  /** v3. Manual user feedback on whether a nudge was useful. 1 = up, -1 = down, null = unrated. Independent of LLM analysis. */
+  user_helpful: 1 | -1 | null;
 }
 
 export interface LlmCallRow {

@@ -18,8 +18,9 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | `client/` | React Native (Expo) app — UI, local SQLite, native bridge, on-device brain | yes |
 | `client/src/` | TypeScript modules used by `App.tsx` | yes |
 | `client/src/db/` | Local SQLite schema, migrations, seed | covered by `client/src/CLAUDE.md` |
+| `client/src/ingest/` | Post-write event cleanup pipeline (noise/merge/short) | covered by `client/src/CLAUDE.md` |
 | `client/src/bridge/` | TS wrapper around the Kotlin bridge | covered by `client/src/CLAUDE.md` |
-| `client/src/screens/` | Tab screens (Today, Events, Rollups, LLM, Nudges, Profile, Chat, Settings) | covered by `client/src/CLAUDE.md` |
+| `client/src/screens/` | Tab screens (Today, Observe = Events+Rollups+LLM+Nudges, Chat, Settings) + Profile overlay reachable from Settings | covered by `client/src/CLAUDE.md` |
 | `client/src/secure/` | Secure-store keys + cost-cap helpers | covered by `client/src/CLAUDE.md` |
 | `client/android/app/src/main/java/com/lifeos/` | Kotlin foreground service + bridge + boot receiver | yes |
 | `docs/` | Architecture + design docs | no (prose only) |
@@ -38,9 +39,9 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | 3d | **done** | Health Connect (5-min poll from FG service; minSdk bumped to 26) |
 | 4 | **done** | Schema v3 + observability tabs + secure-store key entry + chat shell |
 | 5 | **done** | Aggregator (`expo-background-fetch` 15 min). Per tick: `purgeShortAppFg` → `classifySilences` (writes `inferred_activity`) → rebuild `daily_rollup` → recompute `productivity_score` (deterministic SQL). Monthly fold once per day. Manual `Run aggregator now` button on Today. |
-| 6 | **now** | Rule engine (60 s) + 3-level local notifications + `nudges_log` |
-| 7 |  | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement |
-| 8 |  | Nightly Sonnet profile rebuild + AlarmManager + watchdog |
+| 6 | **done** | Rule engine (60 s) + 3-level local notifications + `nudges_log` |
+| 7 | **done** | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement |
+| 8 | **done** | Nightly Sonnet profile rebuild. AlarmManager kicks the FG service at 03:05 daily; the JS watchdog inside the 15-min aggregator tick checks `schema_meta.last_nightly_ts` and runs `runNightlyRebuild` (claude-sonnet-4-5) when due. Cost-capped, validates JSON before persisting. |
 | 9 |  | Chat (Sonnet, tool-calling against local SQLite) |
 | 10 |  | Backups + retention sweeps + OEM autostart helper |
 | 11 |  | Today screen polish + behavior-aware todo reminders |
@@ -105,5 +106,5 @@ adb logcat -s 'LifeOsService:*' 'LifeOsBridge:*' 'LifeOsBoot:*' 'AndroidRuntime:
     Single-responsibility logical units (one rebuilder, one engine, one schema) may exceed
     400 LOC if splitting them harms readability — keep cohesive logic together. Split when
     a file mixes responsibilities, not just to hit a number.
-13. **Schema is at v3 (additive).** New columns: `daily_rollup.productivity_score`, `nudges_log.{next_day_score,baseline_score,score_delta}`. New `EventKind` values: `inferred_activity`, `user_clarification`. Migrations use `addColumnIfMissing` (PRAGMA-guarded `ALTER TABLE`). Never DROP or RENAME.
+13. **Schema is at v3 (additive).** New columns: `daily_rollup.productivity_score`, `nudges_log.{next_day_score,baseline_score,score_delta,user_helpful}`. `user_helpful` is the user's manual thumbs feedback (1=▲, -1=▼, NULL=unrated), INDEPENDENT of the LLM-computed `score_delta`. New `EventKind` values: `inferred_activity`, `user_clarification`. Migrations use `addColumnIfMissing` (PRAGMA-guarded `ALTER TABLE`). Never DROP or RENAME.
 14. **The LLM narrates facts, never invents them.** All correlation numbers passed to Sonnet must come from the `VERIFIED_FACTS` block built by `client/src/brain/verifiedFacts.ts`. Add a new correlation = add the SQL first; only then add a prompt slot for it.

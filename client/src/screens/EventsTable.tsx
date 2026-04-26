@@ -22,6 +22,7 @@ import {
   prettyPkg,
   useAsyncRunner,
 } from './shared';
+import { AppIcon } from './widgets';
 
 const PAGE_SIZE = 25;
 const NEAR_END_THRESHOLD = 0.4; // trigger next page when within 40% of the bottom
@@ -128,28 +129,27 @@ export function EventsTable() {
     const sub =
       r.kind === 'app_fg' || r.kind === 'app_bg'
         ? `${fmtClock(p.startTs)} → ${fmtClock(p.endTs)}`
-        : r.kind;
+        : r.kind.replace(/_/g, ' ');
     return (
       <Pressable onPress={() => setExpanded(isOpen ? null : r.id)} style={s.eventRow}>
         <View style={[s.eventTint, { backgroundColor: tint }]} />
         <View style={s.eventInner}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <View style={{ flex: 1.2 }}>
-              <Text style={s.tdMono}>{fmtTimeShort(r.ts)}</Text>
-            </View>
-            <View style={{ flex: 1.5 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <AppIcon label={appLabel} pkg={p.pkg} fallback={tint} size={34} />
+            <View style={{ flex: 1 }}>
               <Text style={s.eventApp} numberOfLines={1}>
                 {appLabel}
               </Text>
-              <Text style={[s.tdMonoSm, { color: tint }]} numberOfLines={1}>
-                {r.kind === 'app_fg' ? 'opened' : r.kind === 'app_bg' ? 'backgrounded' : r.kind}
-                {' · '}
-                <Text style={{ color: theme.textFaint }}>{sub}</Text>
+              <Text style={[s.tdMonoSm, { color: theme.textFaint }]} numberOfLines={1}>
+                {sub}
               </Text>
             </View>
-            <View style={{ flex: 1, alignItems: 'flex-end' }}>
+            <View style={{ alignItems: 'flex-end' }}>
               <Text style={[s.tdMono, { color: theme.text, fontWeight: '700' }]}>
                 {fmtDur(p.durationMs)}
+              </Text>
+              <Text style={[s.tdMonoSm, { color: theme.textFaint }]}>
+                {fmtTimeShort(r.ts)}
               </Text>
             </View>
           </View>
@@ -186,9 +186,8 @@ export function EventsTable() {
   return (
     <View style={s.flexFill}>
       <View style={s.tableHeader}>
-        <Text style={[s.thCell, { flex: 1.2 }]}>Time</Text>
-        <Text style={[s.thCell, { flex: 1.5 }]}>App / Kind</Text>
-        <Text style={[s.thCell, { flex: 1, textAlign: 'right' }]}>Duration</Text>
+        <Text style={[s.thCell, { flex: 1 }]}>Event</Text>
+        <Text style={[s.thCell, { textAlign: 'right' }]}>Duration · Time</Text>
       </View>
       <FlatList
         data={rows}
