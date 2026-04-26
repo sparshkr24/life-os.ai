@@ -19,11 +19,13 @@ export interface EventListFilter {
   kind?: EventKind | 'all';
   sinceTs?: number;
   limit?: number;
+  offset?: number;
 }
 
 export async function listEvents(f: EventListFilter = {}): Promise<EventRow[]> {
   return withDb(async (db) => {
-    const limit = f.limit ?? 200;
+    const limit = f.limit ?? 25;
+    const offset = f.offset ?? 0;
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (f.kind && f.kind !== 'all') {
@@ -34,8 +36,15 @@ export async function listEvents(f: EventListFilter = {}): Promise<EventRow[]> {
       where.push('ts >= ?');
       args.push(f.sinceTs);
     }
-    const sql = `SELECT * FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ts DESC LIMIT ${limit}`;
+    const sql = `SELECT * FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ts DESC LIMIT ${limit} OFFSET ${offset}`;
     return db.getAllAsync<EventRow>(sql, args);
+  });
+}
+
+export async function eventTotalCount(): Promise<number> {
+  return withDb(async (db) => {
+    const r = await db.getFirstAsync<{ c: number }>('SELECT COUNT(*) AS c FROM events');
+    return r?.c ?? 0;
   });
 }
 

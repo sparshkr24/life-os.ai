@@ -8,7 +8,18 @@
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+/**
+ * v3 (2026-04-26) — additive only.
+ *  - daily_rollup.productivity_score REAL  (deterministic SQL score, see brain/productivityScore.ts)
+ *  - nudges_log.next_day_score    REAL    (productivity_score for the day after the nudge)
+ *  - nudges_log.baseline_score    REAL    (median over preceding 7 days)
+ *  - nudges_log.score_delta       REAL    (next_day - baseline)
+ *  - new EventKind values: 'inferred_activity', 'user_clarification'
+ * Applied by `migrate()` via PRAGMA table_info guarded ALTER TABLE.
+ * No DROP, no RENAME — never.
+ */
 
 /** Ordered list of statements run on every app start (all idempotent). */
 export const PHONE_SCHEMA_SQL: readonly string[] = [
@@ -137,7 +148,11 @@ export type EventKind =
   | 'activity'
   | 'steps'
   | 'notif'
-  | 'heart_rate';
+  | 'heart_rate'
+  // v3: written by the aggregator's silence classifier.
+  | 'inferred_activity'
+  // v3: written when the user answers the silence-prompt nudge.
+  | 'user_clarification';
 
 export type AppCategory = 'productive' | 'neutral' | 'unproductive';
 export type TodoStatus = 'open' | 'done' | 'snoozed' | 'dropped';
@@ -158,6 +173,8 @@ export interface DailyRollupRow {
   date: string;
   data: string;
   updated_ts: number;
+  /** v3. Deterministic SQL score in [0,1]. NULL until aggregator computes it. */
+  productivity_score: number | null;
 }
 
 export interface MonthlyRollupRow {
@@ -194,6 +211,12 @@ export interface NudgeRow {
   level: 1 | 2 | 3;
   user_action: 'dismissed' | 'acted' | 'ignored' | null;
   acted_within_sec: number | null;
+  /** v3. productivity_score of the day AFTER ts (local). */
+  next_day_score: number | null;
+  /** v3. Median productivity_score over the 7 days preceding ts. */
+  baseline_score: number | null;
+  /** v3. next_day_score - baseline_score. */
+  score_delta: number | null;
 }
 
 export interface LlmCallRow {

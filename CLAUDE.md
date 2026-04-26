@@ -33,11 +33,11 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | 1 | **done** | Scaffold + schema v1 + CLAUDE.md tree |
 | 2 | **done** | Foreground Service + boot receiver + bridge + custom APK build |
 | 3a | **done** | UsageStatsManager collector writing `app_fg` events |
-| 3b |  | ActivityRecognition + Sleep API |
-| 3c |  | Geofencing + NotificationListener |
-| 3d |  | Health Connect |
-| **4** | **now** | **Schema v2 + observability tabs + secure-store key entry + chat shell** |
-| 5 |  | Aggregator (WorkManager 15 min) — builds `daily_rollup` + monthly fold |
+| 3b | **done** | ActivityRecognition + Sleep API (broadcast receivers + FG service registration) |
+| 3c | **done** | Geofencing + NotificationListener (bridge + Settings permissions card) |
+| 3d | **done** | Health Connect (5-min poll from FG service; minSdk bumped to 26) |
+| 4 | **now** | **Schema v3 + observability tabs + secure-store key entry + chat shell** |
+| 5 |  | Aggregator (WorkManager 15 min). Per tick: `purgeShortAppFg` → rebuild `daily_rollup` → `classifySilences` (writes `inferred_activity` events) → recompute `productivity_score` (deterministic SQL). Monthly fold once per day. |
 | 6 |  | Rule engine (60 s) + 3-level local notifications + `nudges_log` |
 | 7 |  | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement |
 | 8 |  | Nightly Sonnet profile rebuild + AlarmManager + watchdog |
@@ -101,3 +101,8 @@ adb logcat -s 'LifeOsService:*' 'LifeOsBridge:*' 'LifeOsBoot:*' 'AndroidRuntime:
 9. **Cost cap is a hard wall.** Every LLM call checks today's `llm_calls.cost_usd` sum first.
 10. **CLAUDE.md is read before editing and updated after.** Non-negotiable.
 11. **Log enough to debug, not enough to drown.** `console.log`/`console.error` and `Log.i`/`Log.e`. No log frameworks.
+12. **File size & line length.** No JS/TS file > 400 LOC. No single line > 100 chars. If a file
+    crosses 400, split it by feature (e.g. one screen per file). This applies to every edit and
+    every new file — check before you finish.
+13. **Schema is at v3 (additive).** New columns: `daily_rollup.productivity_score`, `nudges_log.{next_day_score,baseline_score,score_delta}`. New `EventKind` values: `inferred_activity`, `user_clarification`. Migrations use `addColumnIfMissing` (PRAGMA-guarded `ALTER TABLE`). Never DROP or RENAME.
+14. **The LLM narrates facts, never invents them.** All correlation numbers passed to Sonnet must come from the `VERIFIED_FACTS` block built by `client/src/brain/verifiedFacts.ts`. Add a new correlation = add the SQL first; only then add a prompt slot for it.

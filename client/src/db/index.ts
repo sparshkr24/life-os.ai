@@ -112,6 +112,27 @@ export async function withDb<T>(fn: (db: SQLite.SQLiteDatabase) => Promise<T>): 
 }
 
 /**
+ * Force-close the cached JS connection so the next `withDb` call opens a
+ * fresh handle. Use this when you need to read writes made by the Kotlin
+ * foreground service from a *separate* SQLiteDatabase connection in the
+ * same process: expo-sqlite's long-lived connection can hold a stale WAL
+ * read snapshot and miss those external writes until reopened.
+ *
+ * Cheap to call (open is ~1ms on this device). Don't use in hot loops.
+ */
+export async function reopenDb(): Promise<void> {
+  const old = _db;
+  _db = null;
+  if (old) {
+    try {
+      await old.closeAsync();
+    } catch (e) {
+      console.warn('[db] reopenDb close failed (ignored):', (e as Error).message);
+    }
+  }
+}
+
+/**
  * Runs schema DDL (idempotent) and seeds reference rows on first launch.
  * Safe to call on every app start. Returns the schema version applied.
  *
@@ -130,14 +151,65 @@ export async function migrate(): Promise<number> {
     const currentVersion = meta ? Number(meta.value) : 0;
     if (currentVersion < SCHEMA_VERSION) {
       await seedReference(db);
+    }
+    // v3 additive columns. PRAGMA-guarded so safe on every boot.
+    await addColumnIfMissing(db, 'daily_rollup', 'productivity_score', 'REAL');
+    await addColumnIfMissing(db, 'nudges_log', 'next_day_score', 'REAL');
+    await addColumnIfMissing(db, 'nudges_log', 'baseline_score', 'REAL');
+    await addColumnIfMissing(db, 'nudges_log', 'score_delta', 'REAL');
+    if (currentVersion < SCHEMA_VERSION) {
       await db.runAsync(
         `INSERT INTO schema_meta (key, value) VALUES ('version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         [String(SCHEMA_VERSION)],
       );
     }
+    // Sweep junk app_fg rows on every boot. Cheap (single DELETE) and keeps
+    // the events table clean even before the Stage-5 aggregator lands.
+    await purgeShortAppFg(db);
     return SCHEMA_VERSION;
   });
+}
+
+/**
+ * Idempotent ALTER TABLE … ADD COLUMN. expo-sqlite has no IF NOT EXISTS for
+ * ADD COLUMN, so we read PRAGMA table_info and skip if already present.
+ */
+async function addColumnIfMissing(
+  db: SQLite.SQLiteDatabase,
+  table: string,
+  column: string,
+  decl: string,
+): Promise<void> {
+  const rows = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (rows.some((r) => r.name === column)) return;
+  await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl};`);
+  console.log(`[db] added column ${table}.${column} ${decl}`);
+}
+
+/**
+ * Deletes `app_fg` rows whose payload duration_ms is below `thresholdMs`.
+ * These are sub-second RESUMED/PAUSED noise (sub-activity nav, share sheet
+ * pop-ups) — useless for behavior modeling and waste storage.
+ *
+ * Called on every app boot AND will be called by the Stage-5 aggregator
+ * before it builds rollups (so rollups never see this noise either).
+ */
+export async function purgeShortAppFg(
+  db: SQLite.SQLiteDatabase,
+  thresholdMs = 1000,
+): Promise<number> {
+  // SQLite's json_extract is reliable here — payload is always valid JSON.
+  const r = await db.runAsync(
+    `DELETE FROM events
+     WHERE kind = 'app_fg'
+       AND CAST(json_extract(payload, '$.duration_ms') AS INTEGER) < ?`,
+    [thresholdMs],
+  );
+  if (r.changes > 0) {
+    console.log('[db] purgeShortAppFg: deleted ' + r.changes + ' rows < ' + thresholdMs + 'ms');
+  }
+  return r.changes;
 }
 
 async function seedReference(db: SQLite.SQLiteDatabase): Promise<void> {

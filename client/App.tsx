@@ -10,7 +10,13 @@
  */
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  useFonts,
+  JetBrainsMono_400Regular,
+  JetBrainsMono_500Medium,
+  JetBrainsMono_700Bold,
+} from '@expo-google-fonts/jetbrains-mono';
 import { migrate } from './src/db';
 import { LifeOsBridge } from './src/bridge/lifeOsBridge';
 import {
@@ -31,12 +37,26 @@ const TABS: { id: TabId; label: string; icon: string }[] = [
 ];
 
 export default function App() {
+  const [fontsLoaded] = useFonts({
+    JetBrainsMono_400Regular,
+    JetBrainsMono_500Medium,
+    JetBrainsMono_700Bold,
+  });
   return (
     <ThemeProvider>
       <ToastProvider>
-        <Shell />
+        {fontsLoaded ? <Shell /> : <FontGate />}
       </ToastProvider>
     </ThemeProvider>
+  );
+}
+
+function FontGate() {
+  const { theme } = useTheme();
+  return (
+    <View style={[styles.shell, { backgroundColor: theme.bg, alignItems: 'center', justifyContent: 'center' }]}>
+      <ActivityIndicator color={theme.accent} />
+    </View>
   );
 }
 
@@ -87,8 +107,10 @@ function Shell() {
           <View style={styles.headerLeft}>
             <View style={[styles.brandDot, { backgroundColor: theme.accent, shadowColor: theme.accent }]} />
             <View>
-              <Text style={[styles.title, { color: theme.text }]}>Life OS</Text>
-              <Text style={[styles.subtitle, { color: theme.textMuted }]}>{tabSubtitle(tab)}</Text>
+              <Text style={[styles.title, { color: theme.text, fontFamily: theme.monoFont }]}>life.os</Text>
+              <Text style={[styles.subtitle, { color: theme.textMuted, fontFamily: theme.monoFont }]}>
+                {tabSubtitle(tab)}
+              </Text>
             </View>
           </View>
           {native && usageGranted === false && (
@@ -190,7 +212,11 @@ function FloatingNav({ tab, onTab }: { tab: TabId; onTab: (t: TabId) => void }) 
               <Text
                 style={[
                   styles.navLabel,
-                  { color: active ? theme.accentText : theme.textMuted, fontWeight: active ? '700' : '500' },
+                  {
+                    color: active ? theme.accentText : theme.textMuted,
+                    fontWeight: active ? '700' : '500',
+                    fontFamily: theme.monoFont,
+                  },
                 ]}>
                 {t.label}
               </Text>
