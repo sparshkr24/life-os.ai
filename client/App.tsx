@@ -1,128 +1,266 @@
+/**
+ * Root shell. ThemeProvider + ToastProvider wrap a 4-tab layout:
+ * Today / Observe / Chat / Settings.
+ *
+ * Header is a layered band (two stacked translucent rectangles fake a soft
+ * gradient without expo-linear-gradient).
+ *
+ * Bottom nav is a floating glass-style pill detached from screen edges.
+ * The active item slides under an Animated accent pill (no extra deps).
+ */
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { migrate } from './src/db';
+import { LifeOsBridge } from './src/bridge/lifeOsBridge';
 import {
-  ActivityIndicator,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+  TodayScreen,
+  ObservabilityScreen,
+  ChatScreen,
+  SettingsScreen,
+  type TabId,
+} from './src/screens';
+import { ThemeProvider, useTheme } from './src/theme';
+import { ToastProvider, useToast } from './src/toast';
 
-// Default to localhost for web; on a real device set EXPO_PUBLIC_SERVER_URL
-// to your laptop's LAN IP, e.g. http://192.168.1.42:3000
-const SERVER_URL =
-  process.env.EXPO_PUBLIC_SERVER_URL ?? 'http://localhost:3001';
-
-type Health = {
-  ok: boolean;
-  service: string;
-  version: string;
-  now: string;
-};
+const TABS: { id: TabId; label: string; icon: string }[] = [
+  { id: 'today', label: 'Today', icon: '◐' },
+  { id: 'observe', label: 'Observe', icon: '☰' },
+  { id: 'chat', label: 'Chat', icon: '✦' },
+  { id: 'settings', label: 'Settings', icon: '⚙' },
+];
 
 export default function App() {
-  const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'err'>(
-    'idle',
+  return (
+    <ThemeProvider>
+      <ToastProvider>
+        <Shell />
+      </ToastProvider>
+    </ThemeProvider>
   );
-  const [data, setData] = useState<Health | null>(null);
-  const [error, setError] = useState<string | null>(null);
+}
 
-  const ping = async () => {
-    setStatus('loading');
-    setError(null);
-    try {
-      const res = await fetch(`${SERVER_URL}/health`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = (await res.json()) as Health;
-      setData(json);
-      setStatus('ok');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setStatus('err');
-    }
-  };
+function Shell() {
+  const { theme } = useTheme();
+  const toast = useToast();
+  const [tab, setTab] = useState<TabId>('today');
+  const [bootErr, setBootErr] = useState<string | null>(null);
+  const [usageGranted, setUsageGranted] = useState<boolean | null>(null);
+
+  const native = Platform.OS === 'android' && !!LifeOsBridge;
 
   useEffect(() => {
-    ping();
+    (async () => {
+      try {
+        await migrate();
+        if (native) {
+          setUsageGranted(await LifeOsBridge.hasUsageAccess());
+          await LifeOsBridge.startService().catch((e: unknown) => {
+            toast.error('Service start failed: ' + (e instanceof Error ? e.message : String(e)));
+          });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setBootErr(msg);
+        toast.error('Boot failed: ' + msg);
+      }
+    })();
+    // run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  if (bootErr) {
+    return (
+      <View style={[styles.shell, { backgroundColor: theme.bg, padding: 24, gap: 12 }]}>
+        <Text style={[styles.title, { color: theme.text }]}>Life OS</Text>
+        <Text style={[styles.bootErr, { color: theme.err }]}>boot error: {bootErr}</Text>
+      </View>
+    );
+  }
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>AI Life OS</Text>
-      <Text style={styles.subtitle}>v0.0.1 · client running</Text>
-
-      <View style={styles.card}>
-        <Text style={styles.label}>Server</Text>
-        <Text style={styles.mono}>{SERVER_URL}</Text>
-
-        {status === 'loading' && <ActivityIndicator style={{ marginTop: 12 }} />}
-        {status === 'ok' && data && (
-          <>
-            <Text style={[styles.badge, styles.badgeOk]}>OK</Text>
-            <Text style={styles.mono}>{data.service}</Text>
-            <Text style={styles.mono}>{data.now}</Text>
-          </>
-        )}
-        {status === 'err' && (
-          <>
-            <Text style={[styles.badge, styles.badgeErr]}>UNREACHABLE</Text>
-            <Text style={styles.error}>{error}</Text>
-            <Text style={styles.hint}>
-              On a real device, set EXPO_PUBLIC_SERVER_URL to your laptop's LAN
-              IP (run `ipconfig getifaddr en0`).
-            </Text>
-          </>
-        )}
-
-        <Pressable onPress={ping} style={styles.button}>
-          <Text style={styles.buttonText}>Ping /health</Text>
-        </Pressable>
+    <View style={[styles.shell, { backgroundColor: theme.bg }]}>
+      {/* Layered header band (fake gradient via two stacked layers). */}
+      <View style={[styles.headerWrap, { backgroundColor: theme.headerGradBottom }]}>
+        <View style={[styles.headerOverlay, { backgroundColor: theme.headerGradTop, opacity: 0.55 }]} />
+        <View style={styles.headerContent}>
+          <View style={styles.headerLeft}>
+            <View style={[styles.brandDot, { backgroundColor: theme.accent, shadowColor: theme.accent }]} />
+            <View>
+              <Text style={[styles.title, { color: theme.text }]}>Life OS</Text>
+              <Text style={[styles.subtitle, { color: theme.textMuted }]}>{tabSubtitle(tab)}</Text>
+            </View>
+          </View>
+          {native && usageGranted === false && (
+            <Pressable
+              onPress={() =>
+                LifeOsBridge.openUsageAccessSettings().then(async () =>
+                  setUsageGranted(await LifeOsBridge.hasUsageAccess()),
+                )
+              }
+              style={[styles.warnBtn, { backgroundColor: theme.warn }]}>
+              <Text style={styles.warnText}>Grant Usage</Text>
+            </Pressable>
+          )}
+        </View>
       </View>
 
-      <StatusBar style="light" />
+      <View style={styles.content}>
+        {tab === 'today' && <TodayScreen onTab={setTab} />}
+        {tab === 'observe' && <ObservabilityScreen />}
+        {tab === 'chat' && <ChatScreen />}
+        {tab === 'settings' && <SettingsScreen />}
+      </View>
+
+      <FloatingNav tab={tab} onTab={setTab} />
+
+      <StatusBar style={theme.statusBarStyle} />
+    </View>
+  );
+}
+
+function tabSubtitle(t: TabId): string {
+  switch (t) {
+    case 'today':
+      return 'at a glance';
+    case 'observe':
+      return 'raw data · rollups · llm · nudges';
+    case 'chat':
+      return 'ask anything (stage 9)';
+    case 'settings':
+      return 'theme · keys · profile';
+  }
+}
+
+function FloatingNav({ tab, onTab }: { tab: TabId; onTab: (t: TabId) => void }) {
+  const { theme } = useTheme();
+  const idx = TABS.findIndex((t) => t.id === tab);
+  const [navW, setNavW] = useState(0);
+  const slot = useRef(new Animated.Value(idx)).current;
+
+  useEffect(() => {
+    Animated.spring(slot, { toValue: idx, useNativeDriver: false, friction: 9, tension: 120 }).start();
+  }, [idx, slot]);
+
+  const innerW = Math.max(0, navW - 12); // minus horizontal padding (6 + 6)
+  const slotW = innerW / TABS.length;
+  const pillTranslate = slot.interpolate({
+    inputRange: [0, Math.max(1, TABS.length - 1)],
+    outputRange: [0, slotW * (TABS.length - 1)],
+  });
+
+  return (
+    <View pointerEvents="box-none" style={styles.navOuter}>
+      <View
+        onLayout={(e) => setNavW(e.nativeEvent.layout.width)}
+        style={[
+          styles.nav,
+          {
+            backgroundColor: theme.glassBg,
+            borderColor: theme.glassBorder,
+            shadowColor: theme.glassShadow,
+            borderRadius: 32,
+          },
+        ]}>
+        {/* sliding accent pill */}
+        {slotW > 0 && (
+          <Animated.View
+            style={[
+              styles.pill,
+              {
+                width: slotW,
+                backgroundColor: theme.accent,
+                transform: [{ translateX: pillTranslate }],
+                borderRadius: 26,
+              },
+            ]}
+          />
+        )}
+        {TABS.map((t) => {
+          const active = tab === t.id;
+          return (
+            <Pressable
+              key={t.id}
+              onPress={() => onTab(t.id)}
+              style={styles.navItem}
+              hitSlop={6}>
+              <Text style={[styles.navIcon, { color: active ? theme.accentText : theme.textMuted }]}>
+                {t.icon}
+              </Text>
+              <Text
+                style={[
+                  styles.navLabel,
+                  { color: active ? theme.accentText : theme.textMuted, fontWeight: active ? '700' : '500' },
+                ]}>
+                {t.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0b0b0f',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 24,
-  },
-  title: { color: '#fff', fontSize: 32, fontWeight: '700' },
-  subtitle: { color: '#888', marginTop: 4, marginBottom: 32 },
-  card: {
-    width: '100%',
-    backgroundColor: '#16161d',
-    borderRadius: 12,
-    padding: 20,
-    gap: 6,
-  },
-  label: { color: '#888', fontSize: 12, textTransform: 'uppercase' },
-  mono: { color: '#ddd', fontFamily: 'Courier', fontSize: 13 },
-  badge: {
-    alignSelf: 'flex-start',
-    marginTop: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-    fontWeight: '700',
-    fontSize: 11,
+  shell: { flex: 1 },
+  headerWrap: {
+    paddingTop: 48,
+    paddingBottom: 14,
+    paddingHorizontal: 18,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(127,127,127,0.15)',
     overflow: 'hidden',
   },
-  badgeOk: { backgroundColor: '#10b981', color: '#000' },
-  badgeErr: { backgroundColor: '#ef4444', color: '#fff' },
-  error: { color: '#fca5a5', marginTop: 4 },
-  hint: { color: '#888', marginTop: 8, fontSize: 12, lineHeight: 18 },
-  button: {
-    marginTop: 16,
-    backgroundColor: '#3b82f6',
-    paddingVertical: 12,
-    borderRadius: 8,
+  headerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
   },
-  buttonText: { color: '#fff', fontWeight: '600' },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  brandDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  title: { fontSize: 22, fontWeight: '800', letterSpacing: 0.3 },
+  subtitle: { fontSize: 11, marginTop: 1, letterSpacing: 0.4 },
+  warnBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999 },
+  warnText: { color: '#000', fontWeight: '700', fontSize: 11 },
+  content: { flex: 1 },
+
+  navOuter: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 18,
+  },
+  nav: {
+    flexDirection: 'row',
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+    overflow: 'hidden',
+  },
+  pill: {
+    position: 'absolute',
+    top: 6,
+    bottom: 6,
+    left: 6,
+    marginLeft: 0,
+  },
+  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 2, paddingVertical: 6 },
+  navIcon: { fontSize: 18 },
+  navLabel: { fontSize: 11 },
+  bootErr: { fontFamily: 'Courier' },
 });

@@ -1,0 +1,5 @@
+
+# local sqlite
+lifeos.db
+lifeos.db-*
+

@@ -1,62 +1,72 @@
 # AI Life OS
 
-Personal Android assistant. Sideload APK only. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Personal Android assistant. Sideload APK only. **Local-first** — no backend, no cloud DB. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for design and [CLAUDE.md](CLAUDE.md) for working rules.
 
 ## Layout
 
 ```
-client/   Expo (React Native + TypeScript) app
-server/   Node + Express + TypeScript backend
+client/   Expo (React Native + TypeScript) app + native Kotlin module
 docs/     Architecture & design docs
 ```
 
-## Prerequisites
+## Prerequisites (one-time)
 
-- Node 20+ (you have it)
-- For the phone: install **Expo Go** from the Play Store
-- For the actual MVP later (not tonight): JDK 17 + Android SDK (easiest install path = Android Studio, but you'll keep editing in VS Code)
+- Node 20+
+- Android Studio (Android SDK + bundled JDK). Open once, let the standard setup finish.
+- A real Android phone with USB debugging on (Settings → About phone → tap "Build number" 7×; then Settings → Developer options → USB debugging).
 
-## Run it (today's goal: blank screen on phone)
-
-Open two terminals.
-
-**Terminal 1 — server:**
+Add to `~/.zshrc`:
 
 ```bash
-cd server
-npm run dev
-# → listening on http://0.0.0.0:3001
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PATH=$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools
 ```
 
-Sanity check from the laptop:
+`source ~/.zshrc`, then verify with `adb --version` and `java -version`.
+
+## Daily start
+
+Plug phone in, then **one terminal**:
 
 ```bash
-curl http://localhost:3001/health
+cd client && npx expo start --dev-client
 ```
 
-**Terminal 2 — client:**
+Launch "Life OS" on the phone. JS hot-reloads on save.
 
-First, find your laptop's LAN IP and tell the client to use it (so the phone can reach the server):
+## When you change code
+
+| Change | What to run |
+|---|---|
+| JS / TSX only | nothing — Metro hot-reloads |
+| Kotlin (`*.kt`) / `AndroidManifest.xml` / `app.json` permissions | `cd client/android && ./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk` |
+| After USB unplug/replug | `adb reverse tcp:8081 tcp:8081` |
+| Schema change in `client/src/db/schema.ts` | bump `SCHEMA_VERSION`; uninstall+reinstall app to wipe DB |
+
+## Native logs
 
 ```bash
-export EXPO_PUBLIC_SERVER_URL="http://$(ipconfig getifaddr en0):3001"
-cd client
-npx expo start
+adb logcat -s 'LifeOsService:*' 'LifeOsBridge:*' 'LifeOsBoot:*' 'AndroidRuntime:E'
 ```
 
-Then on your phone (same WiFi as laptop):
+## Live db
 
-1. Open Expo Go
-2. Scan the QR code shown in the terminal
-3. App loads — you should see "AI Life OS" with a green "OK" badge from `/health`
+```bashbash
+# 1. Pull the live DB to your Mac
+adb exec-out run-as com.lifeos cat files/SQLite/lifeos.db > lifeos.db
 
-If the badge is red ("UNREACHABLE"), your phone can't reach the laptop. Common causes:
-- Phone and laptop on different WiFi networks
-- macOS firewall blocking node — System Settings → Network → Firewall → allow incoming for `node`
-- You're on `en1` not `en0` — try `ipconfig getifaddr en1`
+# 2. Optional: also pull WAL + SHM (for in-flight writes; safe to skip)
+adb exec-out run-as com.lifeos cat files/SQLite/lifeos.db-wal > lifeos.db-wal 2>/dev/null
+adb exec-out run-as com.lifeos cat files/SQLite/lifeos.db-shm > lifeos.db-shm 2>/dev/null
 
-## Why no Android Studio yet?
+# 3. Install a viewer (one-time)
+brew install --cask db-browser-for-sqlite
 
-Tonight uses **Expo Go** — a pre-built host app that loads your JS bundle. No native compile. No Android SDK. Just WiFi + QR code.
+# 4. Open it
+open -a "DB Browser for SQLite" lifeos.db
+```
 
-You'll need Android Studio's SDK only when we run `npx expo prebuild` to generate a custom APK with the Kotlin native module (Sunday onward, per the architecture doc). Even then, VS Code stays your editor — Android Studio is just the SDK installer.
+## Stage status
+
+See the table in [CLAUDE.md](CLAUDE.md#stage-tracker).
