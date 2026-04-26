@@ -19,6 +19,8 @@ import {
 } from '@expo-google-fonts/jetbrains-mono';
 import { migrate } from './src/db';
 import { LifeOsBridge } from './src/bridge/lifeOsBridge';
+import { registerAggregatorTask } from './src/aggregator/worker';
+import { startRulesForegroundLoop } from './src/rules/worker';
 import {
   TodayScreen,
   ObservabilityScreen,
@@ -73,6 +75,10 @@ function Shell() {
     (async () => {
       try {
         await migrate();
+        registerAggregatorTask().catch((e: unknown) => {
+          console.error('[boot] registerAggregatorTask failed:', e);
+        });
+        startRulesForegroundLoop();
         if (native) {
           setUsageGranted(await LifeOsBridge.hasUsageAccess());
           await LifeOsBridge.startService().catch((e: unknown) => {

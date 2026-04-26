@@ -2,9 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { eventCounts, todayLlmSpendUsd, getProfile } from '../repos/observability';
 import type { BehaviorProfileRow } from '../db/schema';
-import { reopenDb } from '../db';
+import { reopenDb, withDb } from '../db';
 import { useTheme } from '../theme';
 import { LifeOsBridge } from '../bridge/lifeOsBridge';
+import { runAggregatorTick } from '../aggregator';
+import { aggregatorTaskStatus } from '../aggregator/worker';
+import { evaluateRules } from '../rules/engine';
+import { lastRulesTickTs } from '../rules/worker';
+import { useToast } from '../toast';
 import {
   ActionButton,
   fmtTime,
@@ -17,9 +22,11 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const run = useAsyncRunner();
+  const toast = useToast();
   const [counts, setCounts] = useState<{ total: number; lastHour: number } | null>(null);
   const [spend, setSpend] = useState(0);
   const [profile, setProfile] = useState<BehaviorProfileRow | null>(null);
+  const [agg, setAgg] = useState<{ registered: boolean; lastTickTs: number | null } | null>(null);
   const [svc, setSvc] = useState<{
     totalEvents: number;
     eventsLastHour: number;
@@ -35,15 +42,26 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
         // before the foreground service's most recent INSERTs.
         await reopenDb();
         const native = Platform.OS === 'android' && !!LifeOsBridge;
-        const [c, sp, p, st] = await Promise.all([
+        const [c, sp, p, st, taskState, lastTick] = await Promise.all([
           eventCounts(),
           todayLlmSpendUsd(),
           getProfile(),
           native ? LifeOsBridge.getStats() : Promise.resolve(null),
+          aggregatorTaskStatus(),
+          withDb((db) =>
+            db.getFirstAsync<{ value: string } | null>(
+              `SELECT value FROM schema_meta WHERE key = ?`,
+              ['last_aggregator_ts'],
+            ),
+          ),
         ]);
         setCounts(c);
         setSpend(sp);
         setProfile(p);
+        setAgg({
+          registered: taskState.registered,
+          lastTickTs: lastTick?.value ? Number(lastTick.value) : null,
+        });
         if (st)
           setSvc({
             totalEvents: st.totalEvents,
@@ -128,6 +146,56 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
         )}
         <Pressable onPress={() => onTab('settings')} style={s.btnGhost}>
           <Text style={s.btnGhostText}>View in Settings →</Text>
+        </Pressable>
+      </View>
+
+      <View style={s.card}>
+        <Text style={s.label}>Aggregator</Text>
+        <Text style={s.body2}>
+          {agg?.registered ? 'task registered · 15 min' : 'task not registered'}
+        </Text>
+        <Text style={s.muted}>
+          last tick: {agg?.lastTickTs ? fmtTime(agg.lastTickTs) : 'never'}
+        </Text>
+        <Pressable
+          onPress={async () => {
+            await run('aggregator', async () => {
+              const r = await runAggregatorTick();
+              if (r.ok) {
+                toast.ok(`agg ok ${r.durationMs}ms · score ${r.scoreToday ?? '—'}`);
+              } else {
+                toast.error('agg failed: ' + (r.error ?? 'unknown'));
+              }
+            });
+            await refresh();
+          }}
+          style={s.btnGhost}>
+          <Text style={s.btnGhostText}>Run aggregator now →</Text>
+        </Pressable>
+      </View>
+
+      <View style={s.card}>
+        <Text style={s.label}>Rule engine</Text>
+        <Text style={s.body2}>foreground loop · 60 s</Text>
+        <Text style={s.muted}>
+          last rules tick: {lastRulesTickTs() > 0 ? fmtTime(lastRulesTickTs()) : 'never'}
+        </Text>
+        <Pressable
+          onPress={async () => {
+            await run('rules', async () => {
+              const r = await evaluateRules();
+              if (r.errors.length > 0) {
+                toast.error('rules: ' + r.errors[0]);
+              } else {
+                toast.ok(
+                  `rules ok · ${r.fired.length} fired / ${r.evaluated} evaluated`,
+                );
+              }
+            });
+            await refresh();
+          }}
+          style={s.btnGhost}>
+          <Text style={s.btnGhostText}>Run rules now →</Text>
         </Pressable>
       </View>
 

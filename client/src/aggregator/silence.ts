@@ -15,6 +15,7 @@
  * but preserves rows the user has confirmed (`user_confirmed: true`).
  */
 import type * as SQLite from 'expo-sqlite';
+import { localDayStartMs, localHour } from './time';
 
 const NIGHT_START_HOUR = 21;
 const NIGHT_END_HOUR = 7;
@@ -173,49 +174,4 @@ async function placeAt(db: SQLite.SQLiteDatabase, ts: number): Promise<string | 
   } catch {
     return null;
   }
-}
-
-/**
- * Hour-of-day in tz. Uses Intl.DateTimeFormat (built into Hermes); no Luxon dep.
- */
-function localHour(ms: number, tz: string): number {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    hour: '2-digit',
-    hour12: false,
-  });
-  const h = fmt.format(new Date(ms));
-  return Number(h);
-}
-
-/**
- * Epoch ms for the start of local-tz day `date` ('YYYY-MM-DD').
- */
-function localDayStartMs(date: string, tz: string): number {
-  // Find the UTC epoch whose tz-local representation is `date 00:00`.
-  // Search a 36h window around the naive UTC midnight; pick the timestamp
-  // whose Intl-formatted YYYY-MM-DD in `tz` matches `date` and whose
-  // hour/minute/second are 00:00:00.
-  const naive = Date.parse(`${date}T00:00:00Z`);
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  for (let offset = -14 * 3600_000; offset <= 14 * 3600_000; offset += 60_000) {
-    const t = naive + offset;
-    const parts = fmt.formatToParts(new Date(t));
-    const get = (k: string): string => parts.find((p) => p.type === k)?.value ?? '';
-    const ymd = `${get('year')}-${get('month')}-${get('day')}`;
-    if (ymd === date && get('hour') === '00' && get('minute') === '00' && get('second') === '00') {
-      return t;
-    }
-  }
-  // Fallback — never expected; return naive UTC midnight.
-  return naive;
 }
