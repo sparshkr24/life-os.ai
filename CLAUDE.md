@@ -22,12 +22,15 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | `client/src/bridge/` | TS wrapper around the Kotlin bridge | covered by `client/src/CLAUDE.md` |
 | `client/src/screens/` | Tab screens (Today, Observe = Events+Rollups+LLM+Nudges, Chat, Settings) + Profile overlay reachable from Settings | covered by `client/src/CLAUDE.md` |
 | `client/src/secure/` | Secure-store keys + cost-cap helpers | covered by `client/src/CLAUDE.md` |
+| `client/src/memory/` | v3 memory store: embeddings, RAG, scoring (Stage 12+) | yes |
 | `client/android/app/src/main/java/com/lifeos/` | Kotlin foreground service + bridge + boot receiver | yes |
 | `docs/` | Architecture + design docs | no (prose only) |
 
 `server/` was deleted on 2026-04-26 when the system went local-first. Do not recreate it.
 
 ## Stage tracker
+
+### v2 — Foundation (delivered)
 
 | Stage | Status | What it delivers |
 |---|---|---|
@@ -42,9 +45,31 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | 6 | **done** | Rule engine (60 s) + 3-level local notifications + `nudges_log` |
 | 7 | **done** | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement |
 | 8 | **done** | Nightly Sonnet profile rebuild. AlarmManager kicks the FG service at 03:05 daily; the JS watchdog inside the 15-min aggregator tick checks `schema_meta.last_nightly_ts` and runs `runNightlyRebuild` (claude-sonnet-4-5) when due. Cost-capped, validates JSON before persisting. |
-| 9 |  | Chat (Sonnet, tool-calling against local SQLite) |
+| 9 | **done** | Chat (Sonnet, tool-calling against local SQLite). `client/src/brain/chat.ts` runs the loop: cost-cap + key check → POST `/v1/messages` with `tools` → if `stop_reason: tool_use`, run handler locally, append `tool_result`, repeat (max 4 loops). Tools are read-only views over rollups/profile/nudges — no raw events. Logs every turn to `llm_calls` (purpose='chat'). |
 | 10 |  | Backups + retention sweeps + OEM autostart helper |
 | 11 |  | Today screen polish + behavior-aware todo reminders |
+
+### v3 — Intelligence Evolution
+
+> Goal: lift `prediction_hit_rate_7d` from ~0.62 toward 0.90+ while *cutting* monthly LLM cost.
+> Source: [docs/LIFEOS_ARCHITECTURE_EVOLUTION.md](docs/LIFEOS_ARCHITECTURE_EVOLUTION.md). Architecture impact: [docs/ARCHITECTURE.md §9](docs/ARCHITECTURE.md).
+> Each stage is **additive** — v2 must keep working at every step. No big-bang rewrites.
+
+| Stage | Status | What it delivers |
+|---|---|---|
+| 12 | **done** | **Memory store foundation.** Schema v4 adds `memories` table (id/type/summary/cause/effect/impact_score/confidence/occurrences/embedding/tags/predicted_outcome/actual_outcome/was_correct/archived_ts). New folder `client/src/memory/`: `embed.ts` (OpenAI `text-embedding-3-small`, cost-capped, logged to `llm_calls`), `store.ts` (insert/update/archive/score), `rag.ts` (cosine top-k retrieval, recency+impact+confidence re-rank). No LLM extraction or RAG-into-prompt yet — pure scaffolding. |
+| 13 | **now** | **RAG into nightly + chat + daily extraction.** New `client/src/memory/extract.ts`: once-per-day extraction (gpt-4o-mini, strict JSON, gated by `schema_meta.last_extract_date`) called from `runNightlyRebuild` for yesterday's rollup. `brain/nightly.ts` and `brain/chat.ts` both call `retrieveContext` and append the markdown memory block to their prompts; on RAG miss (no memories, embed fail, cost cap) they fall back to the v2 path unchanged. New `LlmPurpose='extract'`. |
+| 14 |  | **LLM-generated rules replace smart-nudge tick.** Weekly rule-generation call writes to `rules` (`source='llm'`, `based_on_memories` JSON). Rule engine executes them offline; smart-nudge tick disabled. ~96 LLM calls/day → 0. |
+| 15 |  | **Self-learning loop.** Predictions stored as memories with `predicted_outcome`. Nightly job sets `actual_outcome` + `was_correct` from rollups. Memory `confidence` updated by reinforcement/contradiction counts. |
+| 16 |  | **Pattern abstraction + merging.** Weekly consolidation pass merges similar specific memories into abstract parents (`parent_id`/`child_ids`); contradicted memories archived (soft-delete). |
+| 17 |  | **Optimization & polish.** RAG result caching (5-min TTL), batch embedding while charging, edge-case handling (empty memory store → fall back to pre-RAG path), perf/battery profiling. |
+
+**Stage-12 invariants (read before touching `client/src/memory/`):**
+- `memories` is *derived*, never authoritative. Truth is still `events` + `daily_rollup` + `verifiedFacts`.
+- Embeddings = JSON-encoded `number[]` in TEXT column. No `sqlite-vss`, no native module. In-process cosine scan over an indexed `WHERE archived_ts IS NULL` SELECT.
+- Soft-delete via `archived_ts`. Never `DELETE FROM memories`.
+- Embedding calls go through `sumTodayLlmCostUsd` cost-cap, same as every LLM call.
+- `text-embedding-3-small` (1536-dim) only. Persist `embed_model` per row so a future swap is a re-embed migration, not a schema bump.
 
 ## How to run
 

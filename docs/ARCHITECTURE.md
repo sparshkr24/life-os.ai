@@ -400,24 +400,42 @@ Every datum has a UI surface so the user can audit it:
 
 ---
 
-## 5. Stage tracker (replaces previous plan)
+## 5. Stage tracker
+
+### v2 — Foundation (delivered)
 
 | Stage | Status | Delivers                                                                |
 |-------|--------|-------------------------------------------------------------------------|
 | 1     | done   | Scaffold + schema v1                                                    |
 | 2     | done   | FG service + boot receiver + bridge + APK build                         |
 | 3a    | done   | UsageStatsManager → `events`                                            |
-| 3b    |        | ActivityRecognition + Sleep API                                         |
-| 3c    |        | Geofencing + NotificationListener                                       |
-| 3d    |        | Health Connect                                                          |
-| 4     | now    | **Schema v2 + observability tabs (Events, Rollups, LLM, Nudges, Profile summary, Chat shell, Settings) + secure store key entry** |
-| 5     |        | Aggregator (WorkManager 15 min) — builds `daily_rollup` + monthly fold  |
-| 6     |        | Rule engine (60 s) + 3-level local notifications + `nudges_log`         |
-| 7     |        | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement                   |
-| 8     |        | Nightly Sonnet profile rebuild + AlarmManager + watchdog                |
-| 9     |        | Chat (Sonnet, tool-calling against local SQLite)                        |
+| 3b    | done   | ActivityRecognition + Sleep API                                         |
+| 3c    | done   | Geofencing + NotificationListener                                       |
+| 3d    | done   | Health Connect                                                          |
+| 4     | done   | Schema v3 + observability tabs + secure-store key entry + chat shell    |
+| 5     | done   | Aggregator (15 min) — `daily_rollup` + monthly fold + productivity score|
+| 6     | done   | Rule engine (60 s) + 3-level local notifications + `nudges_log`         |
+| 7     | done   | Smart-nudge tick (gpt-4o-mini) + cost cap enforcement                   |
+| 8     | done   | Nightly Sonnet profile rebuild + AlarmManager + watchdog                |
+| 9     | done   | Chat (Sonnet, tool-calling against local SQLite)                        |
 | 10    |        | Backups + retention sweeps + OEM autostart helper                       |
 | 11    |        | Today screen polish + behavior-aware todo reminders                     |
+
+### v3 — Intelligence Evolution (see §9)
+
+The v2 system is a reactive tracker. v3 adds a **Memory Layer**, **RAG**, and a
+**self-learning loop** to push prediction accuracy from ~62% toward 90%+ while
+*reducing* monthly LLM cost. Stages 12–17 deliver this evolution in order; each
+is additive and reversible.
+
+| Stage | Status | Delivers                                                                |
+|-------|--------|-------------------------------------------------------------------------|
+| 12    | now    | Memory store foundation: schema v4 (`memories` table) + embeddings + RAG retrieval + scoring (no LLM integration yet) |
+| 13    |        | RAG-fed nightly profile + RAG-fed chat (replaces "send everything")     |
+| 14    |        | LLM-generated rules (weekly) replace the smart-nudge tick               |
+| 15    |        | Self-learning loop: prediction outcomes tracked back into memories      |
+| 16    |        | Pattern abstraction + memory merging (specific → general)               |
+| 17    |        | Optimization, caching, battery profiling, edge cases                    |
 | v1.x  |        | Voice input · home-screen widget · on-device fallback (Gemini Nano)     |
 
 ---
@@ -933,5 +951,155 @@ CONSTRAINTS
 - No marketing language anywhere — copy is precise and slightly dry.
 - No emojis in primary copy. (Inline reactions like 👍 / 👎 are allowed.)
 ````
+
+---
+
+## 9. Intelligence Evolution (v3)
+
+> Source: `docs/LIFEOS_ARCHITECTURE_EVOLUTION.md` (2026-04-28). This section
+> distills that doc into the parts that change *this* repo. Read the source
+> for full reasoning, cost models, and risk analysis.
+
+### 9.1 The gap
+
+v2 is a reactive tracker: `prediction_hit_rate_7d ≈ 0.62`, every LLM call
+receives the entire context window (~30 KB), the smart-nudge tick burns
+gpt-4o-mini ~96×/day, and learned patterns live as prose buried in
+`behavior_profile.data`. There is no structured, retrievable memory and no
+explicit feedback loop. That ceiling is architectural, not a tuning issue.
+
+### 9.2 Three new systems
+
+1. **Memory Layer** — first-class `memories` rows with embeddings, impact
+   scores, and outcome tracking. The Layer-3 user model gains a queryable index.
+2. **RAG** — every LLM call retrieves only the top-k relevant memories instead
+   of receiving full rollups. ~10× token reduction.
+3. **Self-learning loop** — predictions are stored *as memories*, then matched
+   against actual outcomes the next day. Reinforced or contradicted in place.
+
+These compose: memories feed RAG; RAG feeds the LLM; the LLM emits new
+predictions; outcomes update memory confidence; high-confidence patterns get
+promoted to LLM-generated rules that the offline rule engine executes.
+
+### 9.3 Schema additions (v4, additive)
+
+```sql
+CREATE TABLE memories (
+  id            TEXT PRIMARY KEY,        -- uuid
+  created_ts    INTEGER NOT NULL,
+  updated_ts    INTEGER NOT NULL,
+  type          TEXT    NOT NULL,        -- 'pattern'|'causal'|'prediction'|'habit'
+  summary       TEXT    NOT NULL,        -- human-readable, ≤200 chars
+  cause         TEXT,                    -- causal chains only
+  effect        TEXT,
+  impact_score  REAL    NOT NULL,        -- −1.0..+1.0
+  confidence    REAL    NOT NULL,        -- 0.0..1.0
+  occurrences   INTEGER NOT NULL DEFAULT 1,
+  reinforcement INTEGER NOT NULL DEFAULT 0,
+  contradiction INTEGER NOT NULL DEFAULT 0,
+  last_accessed INTEGER NOT NULL,
+  decay_factor  REAL    NOT NULL DEFAULT 0.05,
+  tags          TEXT    NOT NULL,        -- JSON array of strings
+  source_ref    TEXT,                    -- e.g. 'rollup:2026-04-28' or 'prediction:nightly:…'
+  rollup_date   TEXT,                    -- YYYY-MM-DD if extracted from a rollup
+  embedding     TEXT    NOT NULL,        -- JSON array of floats (Float32 packed)
+  embed_model   TEXT    NOT NULL,        -- e.g. 'text-embedding-3-small'
+  predicted_outcome TEXT,                -- for type='prediction'
+  actual_outcome    TEXT,                -- set when outcome is observable
+  was_correct       INTEGER,             -- 1/0/null
+  archived_ts   INTEGER,                 -- soft-delete; null = active
+  parent_id     TEXT,                    -- when this memory subsumes others
+  child_ids     TEXT                     -- JSON array of subsumed memory ids
+);
+CREATE INDEX idx_memories_active ON memories(archived_ts, last_accessed);
+CREATE INDEX idx_memories_type ON memories(type);
+CREATE INDEX idx_memories_rollup ON memories(rollup_date);
+```
+
+Embeddings are stored as JSON-encoded float arrays in the `embedding` TEXT
+column. We do **not** ship `sqlite-vss` in v3 — for ≤5 K rows on-device, a
+client-side cosine scan over a single SELECT is fast enough (target: ≤30 ms
+for top-5 over 1 K memories). If row count crosses ~5 K, revisit Annoy/JSI.
+
+### 9.4 Embedding choice
+
+OpenAI `text-embedding-3-small` (1536-dim, $0.02/1M tokens). Reasons:
+
+- Anthropic ships no embeddings API.
+- The user already has an OpenAI key (smart-nudge stage).
+- 1536 floats × 4 bytes × 5000 rows ≈ 30 MB worst case — fine on-device.
+- Cost is negligible vs. the LLM cap: extracting 5 memories/day = ~$0.0001/day.
+
+`embed_model` is stored per row so we can migrate or re-embed cleanly later.
+
+### 9.5 Module map (v3-only files)
+
+| Path                            | Role                                                       |
+|---------------------------------|------------------------------------------------------------|
+| `client/src/memory/embed.ts`    | OpenAI embeddings; cost-capped; logs to `llm_calls`        |
+| `client/src/memory/store.ts`    | CRUD + scoring (`computeEffectiveScore`, decay, reinforce) |
+| `client/src/memory/rag.ts`      | `retrieveContext({decisionType, …})` → top-k memories      |
+| `client/src/memory/extract.ts`  | (Stage 13) once-per-day extraction from yesterday's rollup |
+| `client/src/memory/consolidate.ts` | (Stage 14) weekly merge + abstract-pattern generation   |
+| `client/src/memory/CLAUDE.md`   | Folder-local instructions                                  |
+
+Stages 13–17 layer on top without touching Stage 12's primitives.
+
+### 9.6 RAG flow (Stage 13)
+
+```
+caller (nightly | chat | future-rules)
+  ↓
+buildRagQuery(decisionType, currentRollup, recentBehavior, requiredTags)
+  ↓
+embed(queryText)                        ← 1× OpenAI call, ~$0.00002
+  ↓
+SELECT id, embedding, … FROM memories
+  WHERE archived_ts IS NULL
+    AND (rollup_date IS NULL OR rollup_date >= today-90d)
+  ↓ (in-process)
+cosineSim(queryVec, row.embedding)      ← top-3K candidates max
+  ↓
+re-rank by (similarity·0.5 + recency·0.2 + |impact|·0.15 + confidence·0.15)
+  ↓
+top-k memories → assembleContext → LLM
+```
+
+Caller never sees raw embeddings; `retrieveContext` returns formatted memory
+blocks ready to drop into a prompt.
+
+### 9.7 Cost & accuracy targets
+
+| Metric                       | v2 today  | v3 target (Stage 17) |
+|------------------------------|-----------|----------------------|
+| Prediction hit rate (7d)     | 0.62      | 0.90+                |
+| LLM calls / month            | ~230      | ~70                  |
+| LLM cost / month             | ~$3.00    | ~$1.10               |
+| Tokens per nightly call      | ~30 K     | ~3 K (RAG-trimmed)   |
+| Smart-nudge tick LLM calls   | ~96/day   | 0 (rules replace)    |
+
+The cost cap stays at $0.30/day. RAG drives most of the saving by trimming
+context; rule generation eliminates the tick entirely.
+
+### 9.8 Hard rules (additions to the existing list)
+
+- **Memories are derived, not authoritative.** Source of truth is still
+  `events` + `daily_rollup` + `verifiedFacts`. A corrupted memory store can
+  always be rebuilt.
+- **Embedding calls obey the cost cap.** Same `sumTodayLlmCostUsd` guard as
+  every other LLM call.
+- **No RAG-only "facts".** Numbers in prompts still come from `verifiedFacts`.
+  Memories provide *patterns* and *predictions*, never raw counts.
+- **Soft-delete only.** Memories are archived (`archived_ts` set), never
+  DELETEd, so contradicted patterns stay auditable.
+
+### 9.9 What v3 explicitly does NOT add
+
+- No new ML model on-device (no Gemini Nano, no MiniMax, no DeepSeek bundling).
+  All model swaps are HTTP endpoint changes, not native code.
+- No vector DB native module. JSON embeddings + in-process cosine until
+  benchmarks force otherwise.
+- No new permissions. Everything reuses existing collectors.
+- No server. Same local-first invariant as v2.
 
 *End of document.*

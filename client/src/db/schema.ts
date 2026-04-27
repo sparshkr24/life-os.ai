@@ -8,9 +8,15 @@
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
+ * v4 (2026-04-28) — additive only. Stage 12 (Intelligence Evolution).
+ *  - new table `memories`: derived patterns/predictions with embeddings.
+ *  - embedding column is JSON-encoded float[] (1536-dim, text-embedding-3-small).
+ *  - soft-delete via archived_ts; never DELETE.
+ * See docs/ARCHITECTURE.md §9 and docs/LIFEOS_ARCHITECTURE_EVOLUTION.md.
+ *
  * v3 (2026-04-26) — additive only.
  *  - daily_rollup.productivity_score REAL  (deterministic SQL score, see brain/productivityScore.ts)
  *  - nudges_log.next_day_score    REAL    (productivity_score for the day after the nudge)
@@ -135,6 +141,40 @@ export const PHONE_SCHEMA_SQL: readonly string[] = [
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );`,
+
+  // v4 — memory store. Derived patterns/predictions with embeddings.
+  // `embedding` is a JSON-encoded float[]; cosine scan is in-process.
+  // `archived_ts` is soft-delete; never DELETE rows.
+  `CREATE TABLE IF NOT EXISTS memories (
+    id TEXT PRIMARY KEY,
+    created_ts INTEGER NOT NULL,
+    updated_ts INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    cause TEXT,
+    effect TEXT,
+    impact_score REAL NOT NULL,
+    confidence REAL NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    reinforcement INTEGER NOT NULL DEFAULT 0,
+    contradiction INTEGER NOT NULL DEFAULT 0,
+    last_accessed INTEGER NOT NULL,
+    decay_factor REAL NOT NULL DEFAULT 0.05,
+    tags TEXT NOT NULL DEFAULT '[]',
+    source_ref TEXT,
+    rollup_date TEXT,
+    embedding TEXT NOT NULL,
+    embed_model TEXT NOT NULL,
+    predicted_outcome TEXT,
+    actual_outcome TEXT,
+    was_correct INTEGER,
+    archived_ts INTEGER,
+    parent_id TEXT,
+    child_ids TEXT
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(archived_ts, last_accessed);`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);`,
+  `CREATE INDEX IF NOT EXISTS idx_memories_rollup ON memories(rollup_date);`,
 ];
 
 export type EventKind =
@@ -159,7 +199,7 @@ export type AppCategory = 'productive' | 'neutral' | 'unproductive';
 export type TodoStatus = 'open' | 'done' | 'snoozed' | 'dropped';
 export type RemindStrategy = 'fixed' | 'context' | 'none';
 export type NudgeSource = 'rule' | 'smart' | 'todo';
-export type LlmPurpose = 'nightly' | 'tick' | 'chat';
+export type LlmPurpose = 'nightly' | 'tick' | 'chat' | 'embed' | 'extract';
 export type LlmModel = 'claude-sonnet-4-x' | 'gpt-4o-mini';
 
 export interface EventRow {
@@ -248,4 +288,43 @@ export interface PlaceRow {
   lat: number;
   lng: number;
   radius_m: number;
+}
+
+// v4 — memory store.
+
+export type MemoryType = 'pattern' | 'causal' | 'prediction' | 'habit';
+
+export interface MemoryRow {
+  id: string;
+  created_ts: number;
+  updated_ts: number;
+  type: MemoryType;
+  summary: string;
+  cause: string | null;
+  effect: string | null;
+  /** [-1, 1]. Negative = harmful, positive = beneficial. */
+  impact_score: number;
+  /** [0, 1]. */
+  confidence: number;
+  occurrences: number;
+  reinforcement: number;
+  contradiction: number;
+  last_accessed: number;
+  decay_factor: number;
+  /** JSON-encoded string[] of tags. */
+  tags: string;
+  source_ref: string | null;
+  /** YYYY-MM-DD if extracted from a daily rollup. */
+  rollup_date: string | null;
+  /** JSON-encoded number[] (length === embedding dim, e.g. 1536). */
+  embedding: string;
+  embed_model: string;
+  predicted_outcome: string | null;
+  actual_outcome: string | null;
+  was_correct: 0 | 1 | null;
+  /** Soft-delete. NULL = active. */
+  archived_ts: number | null;
+  parent_id: string | null;
+  /** JSON-encoded string[] of child memory ids that this row subsumes. */
+  child_ids: string | null;
 }

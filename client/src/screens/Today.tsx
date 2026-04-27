@@ -51,13 +51,13 @@ import {
 
 interface RollupApps {
   pkg: string;
-  total_ms: number;
+  minutes: number;
   category?: 'productive' | 'neutral' | 'unproductive' | string;
 }
 interface RollupSleep {
-  bedtime?: number | null;
-  wake?: number | null;
-  duration_ms?: number | null;
+  start?: string | null;
+  end?: string | null;
+  duration_min?: number | null;
 }
 interface ParsedRollup {
   topApps: RollupApps[];
@@ -76,7 +76,9 @@ function parseRollup(json: string | null, score: number | null, date: string): P
     }
   }
   const o = (v ?? {}) as Record<string, unknown>;
-  const apps = Array.isArray(o.top_apps) ? (o.top_apps as RollupApps[]).slice(0, 3) : [];
+  const apps = Array.isArray(o.by_app)
+    ? (o.by_app as RollupApps[]).filter((a) => (a.minutes ?? 0) > 0).slice(0, 3)
+    : [];
   const sleep = (o.sleep as RollupSleep | undefined) ?? null;
   return {
     topApps: apps,
@@ -84,6 +86,11 @@ function parseRollup(json: string | null, score: number | null, date: string): P
     productivity_score_pct: score == null ? null : Math.round(score * 100),
     date,
   };
+}
+
+function shortHm(s: string): string {
+  const m = s.match(/(\d{2}:\d{2})/);
+  return m ? m[1] : s;
 }
 
 export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
@@ -244,19 +251,19 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
       </View>
 
       {/* sleep snapshot */}
-      {rollup?.sleep && (rollup.sleep.bedtime || rollup.sleep.wake) && (
+      {rollup?.sleep && (rollup.sleep.start || rollup.sleep.end) && (
         <View style={s.card}>
           <Text style={s.label}>Sleep</Text>
           <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 4 }}>
             <Text style={[s.h2, { fontSize: 22 }]}>
-              {rollup.sleep.bedtime ? fmtClock(rollup.sleep.bedtime) : '—'}
+              {rollup.sleep.start ? shortHm(rollup.sleep.start) : '—'}
               <Text style={[s.body2, { color: theme.textMuted }]}>{' → '}</Text>
-              {rollup.sleep.wake ? fmtClock(rollup.sleep.wake) : '—'}
+              {rollup.sleep.end ? shortHm(rollup.sleep.end) : '—'}
             </Text>
             <Text style={[s.body2, { color: theme.textMuted, marginLeft: 'auto' }]}>
-              {rollup.sleep.duration_ms
-                ? `${Math.floor(rollup.sleep.duration_ms / 3600_000)}h ${Math.floor(
-                    (rollup.sleep.duration_ms % 3600_000) / 60_000,
+              {rollup.sleep.duration_min
+                ? `${Math.floor(rollup.sleep.duration_min / 60)}h ${Math.round(
+                    rollup.sleep.duration_min % 60,
                   )}m`
                 : '—'}
             </Text>
@@ -270,7 +277,7 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
           <Text style={s.label}>Top apps today</Text>
           <View style={{ marginTop: 6, gap: 10 }}>
             {rollup.topApps.map((a) => {
-              const minutes = Math.round((a.total_ms ?? 0) / 60_000);
+              const minutes = Math.round(a.minutes ?? 0);
               const pretty = prettyPkg(a.pkg);
               const catColor =
                 a.category === 'productive'

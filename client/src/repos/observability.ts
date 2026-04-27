@@ -108,7 +108,7 @@ export async function listMonthlyRollups(f: RollupFilter): Promise<MonthlyRollup
   });
 }
 
-export type LlmPurposeFilter = 'all' | 'nightly' | 'tick' | 'chat';
+export type LlmPurposeFilter = 'all' | 'nightly' | 'tick' | 'chat' | 'embed' | 'extract';
 
 export async function listLlmCalls(purpose: LlmPurposeFilter, limit = 200): Promise<LlmCallRow[]> {
   return withDb(async (db) => {

@@ -26,6 +26,13 @@ const DB_NAME = 'lifeos.db';
 let _db: SQLite.SQLiteDatabase | null = null;
 let _opening: Promise<SQLite.SQLiteDatabase> | null = null;
 
+// Migration gate. `migrate()` flips this to a promise that resolves once
+// every CREATE TABLE statement has run. `withDb` awaits it on every call so
+// repos / screens that fire DB queries during the boot useEffect can't race
+// ahead of the schema and hit "no such table" errors.
+let _migrationGate: Promise<void> | null = null;
+let _migrationDone = false;
+
 async function openOnce(): Promise<SQLite.SQLiteDatabase> {
   // useNewConnection: true sidesteps the native cachedDatabases list, so we
   // never inherit a half-finalized SharedRef from a previous JS module load.
@@ -72,6 +79,41 @@ function isStaleRefError(e: unknown): boolean {
   );
 }
 
+/**
+ * SQLITE_IOERR (`disk I/O error`) is usually transient on Android: the WAL
+ * checkpoint thread or the Kotlin FG service held the page cache mid-write
+ * and our read landed in the gap. A reopen + short backoff clears it.
+ * If it's a *real* disk failure, the second attempt fails the same way and
+ * we surface the error to the caller.
+ */
+function isTransientIoError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const m = e.message.toLowerCase();
+  return m.includes('disk i/o error') || m.includes('sqlite_ioerr') || m.includes('database is locked');
+}
+
+/**
+ * SQLITE_CORRUPT — the on-disk file is physically damaged (page corruption,
+ * partial write killed mid-fsync, etc). This is NOT recoverable by a reopen.
+ * The only fix is to delete the file and let `migrate()` rebuild from the
+ * schema. Caller (`migrate`) detects this on first boot pass and triggers
+ * the reset flow.
+ *
+ * We DON'T auto-reset inside `withDb`: silently nuking user data on every
+ * read is dangerous. Reset must happen explicitly at boot, after which the
+ * app surfaces a "data was reset, raw events lost" notice.
+ */
+export function isDatabaseCorruptError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const m = e.message.toLowerCase();
+  return (
+    m.includes('database disk image is malformed') ||
+    m.includes('sqlite_corrupt') ||
+    m.includes('not a database') ||
+    m.includes('file is not a database')
+  );
+}
+
 async function execWithBackoff(db: SQLite.SQLiteDatabase, sql: string): Promise<void> {
   let lastErr: unknown = null;
   for (let i = 0; i < 3; i++) {
@@ -94,18 +136,38 @@ async function execWithBackoff(db: SQLite.SQLiteDatabase, sql: string): Promise<
  * arbitrary business logic in the callback — only DB calls.
  */
 export async function withDb<T>(fn: (db: SQLite.SQLiteDatabase) => Promise<T>): Promise<T> {
+  // Block until migration has finished. The `migrate()` call itself bypasses
+  // this (it's the producer of the gate) by going through `withDbUnsafe`.
+  if (_migrationGate && !_migrationDone) {
+    await _migrationGate;
+  }
+  return withDbUnsafe(fn);
+}
+
+/**
+ * Same as `withDb` but skips the migration gate. ONLY for use by `migrate()`
+ * itself — calling `withDb` from inside `migrate` would deadlock since the
+ * gate doesn't resolve until migrate returns.
+ */
+async function withDbUnsafe<T>(fn: (db: SQLite.SQLiteDatabase) => Promise<T>): Promise<T> {
   let db = await getDb();
   try {
     return await fn(db);
   } catch (e) {
-    if (!isStaleRefError(e)) throw e;
-    console.warn('[db] stale handle detected, reopening:', (e as Error).message);
+    const stale = isStaleRefError(e);
+    const ioErr = isTransientIoError(e);
+    if (!stale && !ioErr) throw e;
+    console.warn(
+      `[db] ${stale ? 'stale handle' : 'transient I/O'} detected, reopening:`,
+      (e as Error).message,
+    );
     try {
       await _db?.closeAsync().catch(() => {});
     } catch {
       /* ignore */
     }
     _db = null;
+    if (ioErr) await sleep(120);
     db = await getDb();
     return fn(db);
   }
@@ -133,15 +195,72 @@ export async function reopenDb(): Promise<void> {
 }
 
 /**
+ * Last-resort recovery for SQLITE_CORRUPT. Closes our handle, deletes the
+ * database file (and -wal / -shm sidecars via expo's deleteDatabaseAsync),
+ * then a subsequent `getDb()` recreates an empty file that `migrate()` fills
+ * from the schema. ALL user data is lost — events, rollups, profile,
+ * memories, llm_calls. This is only called from `migrate()` after a corrupt
+ * error during the first boot pass.
+ *
+ * The Kotlin FG service must be torn down BEFORE this runs, otherwise it
+ * keeps writing to the file we just deleted and we end up with two divergent
+ * SQLite files. App.tsx handles that ordering.
+ */
+export async function resetCorruptDatabase(): Promise<void> {
+  console.warn('[db] CORRUPT — wiping database and rebuilding schema');
+  try {
+    await _db?.closeAsync().catch(() => {});
+  } catch {
+    /* ignore */
+  }
+  _db = null;
+  _opening = null;
+  try {
+    await SQLite.deleteDatabaseAsync(DB_NAME);
+  } catch (e) {
+    console.warn('[db] deleteDatabaseAsync threw (continuing):', (e as Error).message);
+  }
+}
+
+/**
  * Runs schema DDL (idempotent) and seeds reference rows on first launch.
  * Safe to call on every app start. Returns the schema version applied.
+ *
+ * Recovery: if the underlying DB file is corrupt (SQLITE_CORRUPT), wipe it
+ * and retry once. The second attempt runs against a freshly created file.
  *
  * NOTE: We deliberately do NOT wrap the CREATE-TABLEs in withTransactionAsync.
  * Each statement is idempotent and nesting transactions inside the
  * stale-ref-prone path triggered the original NPE.
  */
 export async function migrate(): Promise<number> {
-  return withDb(async (db) => {
+  // Install the gate synchronously so any concurrent `withDb` call queued
+  // before this awaits immediately starts blocking. Even if migrate throws,
+  // we resolve the gate so the rest of the app doesn't deadlock — callers
+  // will fail naturally on the missing table and surface the real error.
+  let resolveGate!: () => void;
+  _migrationGate = new Promise<void>((res) => {
+    resolveGate = res;
+  });
+  _migrationDone = false;
+  try {
+    let v: number;
+    try {
+      v = await runMigrate();
+    } catch (e) {
+      if (!isDatabaseCorruptError(e)) throw e;
+      await resetCorruptDatabase();
+      v = await runMigrate();
+    }
+    _migrationDone = true;
+    return v;
+  } finally {
+    resolveGate();
+  }
+}
+
+async function runMigrate(): Promise<number> {
+  return withDbUnsafe(async (db) => {
     for (const stmt of PHONE_SCHEMA_SQL) {
       await execWithBackoff(db, stmt);
     }
@@ -154,6 +273,13 @@ export async function migrate(): Promise<number> {
     }
     // v3 additive columns. PRAGMA-guarded so safe on every boot.
     await addColumnIfMissing(db, 'daily_rollup', 'productivity_score', 'REAL');
+    // v2-retroactive: nudges_log gained reasoning/level/llm_call_id but the
+    // table existed in v1, so CREATE TABLE IF NOT EXISTS no-ops on upgrade.
+    await addColumnIfMissing(db, 'nudges_log', 'source', "TEXT NOT NULL DEFAULT 'rule'");
+    await addColumnIfMissing(db, 'nudges_log', 'rule_id', 'TEXT');
+    await addColumnIfMissing(db, 'nudges_log', 'llm_call_id', 'INTEGER');
+    await addColumnIfMissing(db, 'nudges_log', 'reasoning', "TEXT NOT NULL DEFAULT ''");
+    await addColumnIfMissing(db, 'nudges_log', 'level', 'INTEGER NOT NULL DEFAULT 1');
     await addColumnIfMissing(db, 'nudges_log', 'next_day_score', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'baseline_score', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'score_delta', 'REAL');

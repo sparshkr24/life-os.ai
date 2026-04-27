@@ -29,6 +29,8 @@ import { computeProductivityScore } from './productivityScore';
 import { NIGHTLY_SYSTEM_PROMPT, buildNightlyUserPrompt } from './nightly.prompt';
 import type { BehaviorProfileV3 } from './behaviorProfile.types';
 import { deviceTz, localDateStr, prevDate } from '../aggregator/time';
+import { runDailyMemoryExtraction } from '../memory/extract';
+import { retrieveContext } from '../memory/rag';
 
 // claude-sonnet-4 pricing as of April 2026 (USD per 1M tokens).
 const PRICE_INPUT_PER_M = 3.0;
@@ -93,10 +95,24 @@ export async function runNightlyRebuild(): Promise<NightlyReport> {
       }
     });
 
+    // Stage 13: extract memories from yesterday's rollup before consolidating.
+    // Self-gated by schema_meta.last_extract_date; cheap when already done.
+    try {
+      const ex = await runDailyMemoryExtraction(yesterday);
+      if (ex.error) console.warn('[nightly] extract error:', ex.error);
+    } catch (e) {
+      console.warn('[nightly] extract threw:', (e as Error).message);
+    }
+
     const { prior, days, months, verifiedFacts } = await loadNightlyInputs();
     result.basedOnDays = days.length;
 
-    const userPrompt = buildNightlyUserPrompt({ prior, days, months, verifiedFacts });
+    // Stage 13: RAG — retrieve memories relevant to consolidation.
+    const memoryBlock = await buildNightlyMemoryBlock(days);
+
+    const userPrompt =
+      buildNightlyUserPrompt({ prior, days, months, verifiedFacts }) +
+      (memoryBlock ? `\n\n${memoryBlock}` : '');
 
     const httpResponse = await fetch(ANTHROPIC_URL, {
       method: 'POST',
@@ -377,4 +393,34 @@ function stepDate(date: string, deltaDays: number): string {
   const d = new Date(date + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() + deltaDays);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Build the RAG memory block for the nightly user prompt. Empty string when
+ * we have no embeddable signal yet (no memories, embed failure, cost cap) so
+ * the prompt cleanly degrades to the v2 path.
+ */
+async function buildNightlyMemoryBlock(days: unknown[]): Promise<string> {
+  try {
+    const recent = days.slice(0, 4) as Array<Record<string, unknown>>;
+    const queryText = recent
+      .map((d) => {
+        const date = typeof d.date === 'string' ? d.date : '?';
+        const score =
+          typeof d.productivity_score === 'number' ? d.productivity_score.toFixed(2) : 'n/a';
+        return `${date} score=${score}`;
+      })
+      .join(' | ');
+    if (!queryText) return '';
+    const r = await retrieveContext({
+      decisionType: 'nightly_consolidation',
+      queryText,
+      k: 12,
+    });
+    if (!r.embedded || r.memories.length === 0) return '';
+    return r.contextBlock;
+  } catch (e) {
+    console.warn('[nightly] rag failed:', (e as Error).message);
+    return '';
+  }
 }

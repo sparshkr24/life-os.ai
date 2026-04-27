@@ -31,6 +31,45 @@ import {
 } from './src/screens';
 import { ThemeProvider, useTheme } from './src/theme';
 import { ToastProvider, useToast } from './src/toast';
+import { ErrorBoundary, reportFatal } from './src/ErrorBoundary';
+
+// Global handler for unhandled JS errors AND unhandled promise rejections.
+// React's ErrorBoundary only catches render-time errors; this catches the
+// rest (async callbacks, setTimeout, untracked promises) and forwards them
+// to the boundary so the user sees a crash card instead of a white screen.
+installGlobalErrorHandlers();
+
+function installGlobalErrorHandlers(): void {
+  const g = globalThis as unknown as {
+    ErrorUtils?: {
+      getGlobalHandler?: () => (e: Error, isFatal?: boolean) => void;
+      setGlobalHandler?: (fn: (e: Error, isFatal?: boolean) => void) => void;
+    };
+    process?: { on?: (ev: string, fn: (e: unknown) => void) => void };
+  };
+  const eu = g.ErrorUtils;
+  if (eu?.getGlobalHandler && eu.setGlobalHandler) {
+    const prev = eu.getGlobalHandler();
+    eu.setGlobalHandler((e, isFatal) => {
+      try {
+        reportFatal(e instanceof Error ? e : new Error(String(e)));
+      } catch {
+        /* ignore */
+      }
+      try {
+        prev(e, isFatal);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+  // RN's HermesPromiseRejectionTracker fires this on unhandled rejections.
+  if (g.process?.on) {
+    g.process.on('unhandledRejection', (reason: unknown) => {
+      reportFatal(reason instanceof Error ? reason : new Error(String(reason)));
+    });
+  }
+}
 
 const TABS: { id: TabId; label: string; icon: string }[] = [
   { id: 'today', label: 'Today', icon: '◐' },
@@ -48,7 +87,9 @@ export default function App() {
   return (
     <ThemeProvider>
       <ToastProvider>
-        {fontsLoaded ? <Shell /> : <FontGate />}
+        <ErrorBoundary>
+          {fontsLoaded ? <Shell /> : <FontGate />}
+        </ErrorBoundary>
       </ToastProvider>
     </ThemeProvider>
   );

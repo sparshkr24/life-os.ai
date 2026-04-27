@@ -1,43 +1,112 @@
-import { useState } from 'react';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+/**
+ * Stage-9 chat. Calls Sonnet via `runChatTurn` (brain/chat.ts), which exposes
+ * read-only tools over the local DB. Renders user/assistant bubbles plus a
+ * subtle footer showing today's LLM spend and the cost of the latest reply.
+ */
+import { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useTheme } from '../theme';
 import { makeStyles } from './shared';
-
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  text: string;
-  ts: number;
-}
+import { runChatTurn, type ChatTurn } from '../brain/chat';
+import { todayLlmSpendUsd } from '../repos/observability';
+import { useToast } from '../toast';
 
 export function ChatScreen() {
   const { theme } = useTheme();
   const s = makeStyles(theme);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const toast = useToast();
+  const [messages, setMessages] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [spend, setSpend] = useState(0);
+  const [lastCost, setLastCost] = useState<number | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
 
-  const send = () => {
+  useEffect(() => {
+    todayLlmSpendUsd().then(setSpend).catch(() => {});
+  }, [messages.length]);
+
+  const send = async () => {
     const text = input.trim();
-    if (!text) return;
+    if (!text || sending) return;
     const now = Date.now();
-    setMessages((m) => [
-      ...m,
-      { role: 'user', text, ts: now },
-      {
-        role: 'assistant',
-        text:
-          'Chat is wired in Stage 9. Set the Anthropic key in Settings, and once Sonnet ' +
-          'tool-calling lands, replies will render here.',
-        ts: now + 1,
-      },
-    ]);
+    const next: ChatTurn[] = [...messages, { role: 'user', text, ts: now }];
+    setMessages(next);
     setInput('');
+    setSending(true);
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 30);
+    try {
+      const r = await runChatTurn(next);
+      if (r.skipped === 'cost_cap') {
+        toast.error('daily LLM cap reached — bump it in Settings');
+        setMessages((m) => [
+          ...m,
+          {
+            role: 'assistant',
+            text: 'Daily LLM spend cap is exhausted. Increase the cap in Settings or wait until tomorrow.',
+            ts: Date.now(),
+          },
+        ]);
+      } else if (r.skipped === 'no_key') {
+        toast.error('add an Anthropic key in Settings');
+        setMessages((m) => [
+          ...m,
+          {
+            role: 'assistant',
+            text: 'No Anthropic key set. Add one in Settings → API Keys to enable chat.',
+            ts: Date.now(),
+          },
+        ]);
+      } else if (r.error) {
+        toast.error('chat: ' + r.error);
+        setMessages((m) => [
+          ...m,
+          {
+            role: 'assistant',
+            text: `Error: ${r.error}`,
+            ts: Date.now(),
+          },
+        ]);
+      } else {
+        setLastCost(r.costUsd);
+        setMessages((m) => [
+          ...m,
+          { role: 'assistant', text: r.text, ts: Date.now() },
+        ]);
+      }
+    } catch (e) {
+      toast.error('chat: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSending(false);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 30);
+    }
   };
 
   return (
-    <View style={[s.body, { paddingBottom: 0 }]}>
-      <ScrollView style={s.list} contentContainerStyle={{ paddingBottom: 120 }}>
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView
+        ref={scrollRef}
+        style={s.list}
+        contentContainerStyle={{ padding: 14, paddingBottom: 16, gap: 8 }}>
         {messages.length === 0 && (
-          <Text style={s.muted}>Shell only — Stage 9 wires Sonnet with tools.</Text>
+          <View style={[s.card, { marginHorizontal: 0 }]}>
+            <Text style={s.label}>Chat</Text>
+            <Text style={[s.body2, { marginTop: 6, color: theme.textMuted }]}>
+              Ask about your day, sleep, top apps, or what your profile says about you.
+              Replies use real numbers from your local data — never invented.
+            </Text>
+          </View>
         )}
         {messages.map((m, i) => (
           <View
@@ -50,7 +119,25 @@ export function ChatScreen() {
             <Text style={m.role === 'user' ? s.bubbleTextUser : s.bubbleText}>{m.text}</Text>
           </View>
         ))}
+        {sending && (
+          <View style={[s.bubble, s.bubbleAssistant, { alignSelf: 'flex-start' }]}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        )}
       </ScrollView>
+      <View
+        style={{
+          paddingHorizontal: 14,
+          paddingVertical: 6,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+        <Text style={[s.tdMonoSm, { color: theme.textFaint, flex: 1 }]}>
+          today: ${spend.toFixed(4)}
+          {lastCost != null && ` · last reply $${lastCost.toFixed(5)}`}
+        </Text>
+      </View>
       <View style={[s.toolbar, { paddingBottom: 110 }]}>
         <TextInput
           placeholder="Ask anything…"
@@ -58,12 +145,16 @@ export function ChatScreen() {
           value={input}
           onChangeText={setInput}
           onSubmitEditing={send}
+          editable={!sending}
           style={[s.input, { flex: 1 }]}
         />
-        <Pressable onPress={send} style={s.btnInline}>
-          <Text style={s.btnText}>Send</Text>
+        <Pressable
+          onPress={send}
+          disabled={sending || !input.trim()}
+          style={[s.btnInline, (sending || !input.trim()) && { opacity: 0.5 }]}>
+          <Text style={s.btnText}>{sending ? '…' : 'Send'}</Text>
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
