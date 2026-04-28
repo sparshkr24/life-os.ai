@@ -294,6 +294,12 @@ async function runMigrate(): Promise<number> {
     );
     await addColumnIfMissing(db, 'app_categories', 'last_categorized_ts', 'INTEGER');
     await addColumnIfMissing(db, 'app_categories', 'details', 'TEXT');
+    // v6 — rules columns for LLM-generated rules (Stage 14).
+    await addColumnIfMissing(db, 'rules', 'source', "TEXT NOT NULL DEFAULT 'user'");
+    await addColumnIfMissing(db, 'rules', 'predicted_impact_score', 'REAL');
+    await addColumnIfMissing(db, 'rules', 'based_on_memory_ids', 'TEXT');
+    await addColumnIfMissing(db, 'rules', 'disabled_reason', 'TEXT');
+    await addColumnIfMissing(db, 'rules', 'last_refined_ts', 'INTEGER');
     if (currentVersion < SCHEMA_VERSION) {
       await db.runAsync(
         `INSERT INTO schema_meta (key, value) VALUES ('version', ?)

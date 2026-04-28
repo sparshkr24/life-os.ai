@@ -76,6 +76,22 @@ interface DailyData {
   todos?: { created: number; completed: number };
   nudges?: { fired: number; acted: number; dismissed: number };
   silences?: { duration_min: number; label: string; confidence: number }[];
+  predictive_insights?: PredictiveInsightsBlock;
+}
+
+interface PredictiveInsightsBlock {
+  generated_ts: number;
+  query: string;
+  insights: {
+    memory_id: string;
+    type: string;
+    summary: string;
+    cause: string | null;
+    effect: string | null;
+    impact_score: number;
+    confidence: number;
+    similarity: number;
+  }[];
 }
 
 interface MonthlyData {
@@ -466,8 +482,19 @@ function DailyDetail({ tile }: { tile: DailyTile }) {
     .sort((a, b) => b[1] - a[1]);
   const totalCatMin = cats.reduce((acc, [, v]) => acc + v, 0);
 
-  const yesterdayWin = topProductiveApp(prev?.data);
-  const projection = projectScore(score, sleepMin, screenMin);
+  // Insights here are precomputed by the aggregator (see
+  // brain/predictiveInsights.ts) every ~90 min and embedded inside the
+  // rollup JSON. We render them straight from `data.predictive_insights`
+  // — no DB or LLM call on render.
+  const predictive = data.predictive_insights?.insights ?? [];
+  const yesterdayWin = useYesterdayWinMemory(tile.key);
+  // Don't double-show the same memory if it appears as yesterday's win.
+  const dayMemories = yesterdayWin
+    ? predictive.filter((m) => m.memory_id !== yesterdayWin.id)
+    : predictive;
+  const [showAllMemories, setShowAllMemories] = useState(false);
+  const visibleMemories = showAllMemories ? dayMemories : dayMemories.slice(0, 2);
+  const hiddenCount = Math.max(0, dayMemories.length - visibleMemories.length);
 
   return (
     <View style={{ gap: 16 }}>
@@ -611,21 +638,53 @@ function DailyDetail({ tile }: { tile: DailyTile }) {
         </View>
       )}
 
-      {/* insights — predicted productivity, yesterday's win */}
-      {(projection || yesterdayWin) && (
+      {/* insights — predictive RAG hits the aggregator computed for today
+          (similar past patterns and what they led to), plus yesterday's
+          biggest personalised win. Both come from the memory store; no
+          generic fallback. */}
+      {(visibleMemories.length > 0 || yesterdayWin) && (
         <View>
           <SectionHeader>Insights</SectionHeader>
           <View style={{ gap: 8, marginTop: 4 }}>
-            {projection && (
-              <InsightLine theme={theme} icon="◐" text={projection} />
+            {visibleMemories.map((memory) => (
+              <InsightLine
+                key={memory.memory_id}
+                theme={theme}
+                icon={memoryIcon(memory.type)}
+                text={formatPredictiveInsight(memory)}
+              />
+            ))}
+            {hiddenCount > 0 && (
+              <Pressable onPress={() => setShowAllMemories(true)}>
+                <Text
+                  style={{
+                    color: theme.accent,
+                    fontSize: 12,
+                    paddingVertical: 6,
+                    paddingHorizontal: 12,
+                  }}>
+                  Show {hiddenCount} more memor{hiddenCount === 1 ? 'y' : 'ies'}
+                </Text>
+              </Pressable>
+            )}
+            {showAllMemories && dayMemories.length > 2 && (
+              <Pressable onPress={() => setShowAllMemories(false)}>
+                <Text
+                  style={{
+                    color: theme.textMuted,
+                    fontSize: 12,
+                    paddingVertical: 6,
+                    paddingHorizontal: 12,
+                  }}>
+                  Show less
+                </Text>
+              </Pressable>
             )}
             {yesterdayWin && (
               <InsightLine
                 theme={theme}
                 icon="✓"
-                text={`Yesterday's anchor: ${prettyPkg(yesterdayWin.pkg)} (${Math.round(
-                  yesterdayWin.minutes,
-                )}m productive). Repeat it today.`}
+                text={`Yesterday's win: ${formatYesterdayWin(yesterdayWin)}`}
               />
             )}
           </View>
@@ -886,34 +945,97 @@ function catTint(theme: ThemeTokens, cat: string): string {
   return theme.textMuted;
 }
 
-function topProductiveApp(d: DailyData | undefined): { pkg: string; minutes: number } | null {
-  if (!d?.by_app) return null;
-  const sorted = d.by_app
-    .filter((a) => a.category === 'productive' && a.minutes > 0)
-    .sort((a, b) => b.minutes - a.minutes);
-  return sorted[0] ?? null;
+function memoryIcon(type: string): string {
+  if (type === 'causal') return '→';
+  if (type === 'habit') return '○';
+  if (type === 'prediction') return '◈';
+  if (type === 'preference') return '♡';
+  if (type === 'identity') return '★';
+  return '•';
 }
 
-function projectScore(
-  score: number | null,
-  sleepMin: number,
-  screenMin: number,
-): string | null {
-  if (score == null) return null;
-  // Heuristic projection: deep sleep + low screen = good momentum tomorrow,
-  // late-screen or short sleep predicts a dip.
-  const hours = sleepMin / 60;
-  if (hours >= 7 && screenMin < 240 && score >= 60) {
-    return `On pace for a strong tomorrow — ${hours.toFixed(1)}h sleep + balanced screen time historically holds the score.`;
-  }
-  if (hours < 6) {
-    return `Short sleep (${hours.toFixed(1)}h) tends to pull tomorrow's score down ~10–15 pts. Wind down earlier tonight.`;
-  }
-  if (screenMin > 360) {
-    return `${Math.round(screenMin / 60)}h screen time is in the heavy zone. Cutting an hour usually buys back ~5 score pts.`;
-  }
-  if (score < 40) {
-    return `Low day. One small productive block (≥30m) tomorrow morning is the highest-leverage move.`;
-  }
-  return null;
+/**
+ * Yesterday's biggest personalised win: the single highest positive-impact
+ * memory the memory pass extracted from the previous day. Returns null when
+ * the prior day has no positive-impact memory yet (e.g. nightly pass hasn't
+ * run, or the day was unremarkable). Never falls back to a generic heuristic.
+ */
+function useYesterdayWinMemory(date: string): RollupMemoryRow | null {
+  const [memory, setMemory] = useState<RollupMemoryRow | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const prevDate = isoPrevDate(date);
+      if (!prevDate) {
+        setMemory(null);
+        return;
+      }
+      const row = await withDb((db) =>
+        db.getFirstAsync<RollupMemoryRow>(
+          `SELECT id, type, summary, cause, effect, impact_score, confidence,
+                  occurrences, was_correct, predicted_outcome, actual_outcome
+           FROM memories
+           WHERE archived_ts IS NULL
+             AND rollup_date = ?
+             AND impact_score > 0
+           ORDER BY impact_score * confidence DESC
+           LIMIT 1`,
+          [prevDate],
+        ),
+      );
+      if (!alive) return;
+      setMemory(row ?? null);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [date]);
+  return memory;
+}
+
+function isoPrevDate(date: string): string | null {
+  const m = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+interface RollupMemoryRow {
+  id: string;
+  type: string;
+  summary: string;
+  cause: string | null;
+  effect: string | null;
+  impact_score: number;
+  confidence: number;
+  occurrences: number;
+  was_correct: 0 | 1 | null;
+  predicted_outcome: string | null;
+  actual_outcome: string | null;
+}
+
+function formatPredictiveInsight(memory: PredictiveInsightsBlock['insights'][number]): string {
+  const impactPercent = Math.round(memory.impact_score * 100);
+  const sign = memory.impact_score >= 0 ? '+' : '';
+  const confidencePercent = Math.round(memory.confidence * 100);
+  const matchPercent = Math.round(memory.similarity * 100);
+  const chain =
+    memory.cause && memory.effect ? ` (${memory.cause} → ${memory.effect})` : '';
+  return `${memory.summary}${chain} · match ${matchPercent}% · impact ${sign}${impactPercent}% · conf ${confidencePercent}%`;
+}
+
+function formatYesterdayWin(memory: RollupMemoryRow): string {
+  const impactPercent = Math.round(memory.impact_score * 100);
+  const sign = memory.impact_score >= 0 ? '+' : '';
+  const confidencePercent = Math.round(memory.confidence * 100);
+  const chain =
+    memory.cause && memory.effect ? ` (${memory.cause} → ${memory.effect})` : '';
+  const verdict =
+    memory.was_correct === null
+      ? ''
+      : memory.was_correct === 1
+        ? ' — confirmed'
+        : ' — contradicted';
+  return `${memory.summary}${chain} · impact ${sign}${impactPercent}% · conf ${confidencePercent}%${verdict}`;
 }

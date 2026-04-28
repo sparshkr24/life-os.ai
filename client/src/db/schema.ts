@@ -8,7 +8,17 @@
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
+
+/**
+ * v6 (2026-04-29) — additive only. Stage 14 (LLM-generated rules).
+ *  - rules.source                  TEXT  ('user' | 'seed' | 'llm') default 'user'
+ *  - rules.predicted_impact_score  REAL  set by the nightly nudge pass
+ *  - rules.based_on_memory_ids     TEXT  JSON array of memory.id
+ *  - rules.disabled_reason         TEXT  free-form, set when LLM auto-disables
+ *  - rules.last_refined_ts         INTEGER  epoch ms
+ * Applied via `addColumnIfMissing`.
+ */
 
 /**
  * v5 (2026-04-28) — additive only.

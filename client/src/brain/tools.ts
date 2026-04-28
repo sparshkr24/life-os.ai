@@ -42,7 +42,7 @@ import type { ToolDefinition } from '../llm/types';
 // Scopes & registry
 // ─────────────────────────────────────────────────────────────────────────
 
-export type ToolScope = 'chat' | 'nightly_memory' | 'nightly_profile';
+export type ToolScope = 'chat' | 'nightly_memory' | 'nightly_profile' | 'nightly_nudge';
 
 interface ToolEntry {
   def: ToolDefinition;
@@ -152,7 +152,7 @@ add({
       "Today's daily rollup + productivity score, sleep, top apps, screen time, nudges fired.",
     parameters: { type: 'object', properties: {}, required: [] },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async () => loadDailyRollup(localDateStr(Date.now(), deviceTz())),
 });
 
@@ -166,7 +166,7 @@ add({
       required: ['date'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     if (!isDateStr(args.date)) return { error: 'date must be YYYY-MM-DD' };
     return loadDailyRollup(args.date);
@@ -184,7 +184,7 @@ add({
       required: [],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const n = clampInt(args.days, 1, 30, 7);
     const tz = deviceTz();
@@ -208,7 +208,7 @@ add({
       required: ['month'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     if (!isMonthStr(args.month)) return { error: 'month must be YYYY-MM' };
     return withDb(async (db) => {
@@ -233,7 +233,7 @@ add({
       "The user's behavior profile (good habits, time-wasters, suggested rules). Built nightly.",
     parameters: { type: 'object', properties: {}, required: [] },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async () => {
     return withDb(async (db) => {
       const r = await db.getFirstAsync<{ data: string; built_ts: number; based_on_days: number }>(
@@ -261,7 +261,7 @@ add({
       required: [],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const n = clampInt(args.days, 1, 30, 7);
     const since = Date.now() - n * 24 * 3600_000;
@@ -308,7 +308,7 @@ add({
       required: ['query'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const query = asString(args.query, 1000);
     if (!query) return { error: 'query required' };
@@ -367,7 +367,7 @@ add({
       required: ['id'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const id = asString(args.id, 100);
     if (!id) return { error: 'id required' };
@@ -395,7 +395,7 @@ add({
       required: ['start_ts', 'end_ts'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const startTs = Number(args.start_ts);
     const endTs = Number(args.end_ts);
@@ -442,7 +442,7 @@ add({
       required: ['date'],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     if (!isDateStr(args.date)) return { error: 'date must be YYYY-MM-DD' };
     const topN = clampInt(args.top_n, 1, 100, 20);
@@ -484,7 +484,7 @@ add({
       required: [],
     },
   },
-  scopes: ['chat', 'nightly_memory', 'nightly_profile'],
+  scopes: ['chat', 'nightly_memory', 'nightly_profile', 'nightly_nudge'],
   handler: async (args) => {
     const onlyUn = asBool(args.only_unenriched, false);
     const limit = clampInt(args.limit, 1, 200, 100);
@@ -874,6 +874,313 @@ add({
         [pkg, category, subcategory, now, detailsJson],
       );
       return { pkg, category, subcategory, enriched: true };
+    });
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// NIGHTLY-NUDGE writes (Stage 14 — LLM-generated rules)
+// Write tools below operate ONLY on rules with source='llm'. Existing
+// 'user' / 'seed' rules are read-only here — the user owns those.
+// ─────────────────────────────────────────────────────────────────────────
+
+add({
+  def: {
+    name: 'list_rules',
+    description:
+      "List rules. Use to see what's already in place before creating new ones. Filter by source (\"llm\"|\"seed\"|\"user\") and/or enabled (true|false).",
+    parameters: {
+      type: 'object',
+      properties: {
+        source: { type: 'string', enum: ['llm', 'seed', 'user'] },
+        enabled: { type: 'boolean' },
+      },
+    },
+  },
+  scopes: ['nightly_nudge'],
+  handler: async (args) => {
+    const source = asString(args.source, 16);
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (source === 'llm' || source === 'seed' || source === 'user') {
+      where.push('source = ?');
+      params.push(source);
+    }
+    if (typeof args.enabled === 'boolean') {
+      where.push('enabled = ?');
+      params.push(args.enabled ? 1 : 0);
+    }
+    const sql =
+      `SELECT id, name, enabled, trigger, action, cooldown_min, source,
+              predicted_impact_score, based_on_memory_ids, disabled_reason,
+              last_refined_ts
+       FROM rules` + (where.length ? ` WHERE ${where.join(' AND ')}` : '');
+    return withDb(async (db) => {
+      const rows = await db.getAllAsync<{
+        id: string;
+        name: string;
+        enabled: number;
+        trigger: string;
+        action: string;
+        cooldown_min: number;
+        source: string;
+        predicted_impact_score: number | null;
+        based_on_memory_ids: string | null;
+        disabled_reason: string | null;
+        last_refined_ts: number | null;
+      }>(sql, params);
+      return rows.map((r) => ({
+        ...r,
+        enabled: r.enabled === 1,
+        trigger: safeJson(r.trigger),
+        action: safeJson(r.action),
+        based_on_memory_ids: r.based_on_memory_ids
+          ? safeArr(r.based_on_memory_ids)
+          : [],
+      }));
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'get_rule_effectiveness',
+    description:
+      'For a given rule, return how well it has performed recently: number of times fired, ' +
+      'average score_delta on next-day productivity, and user thumbs (helpful=1, unhelpful=-1) counts. ' +
+      'Use to decide whether to keep, refine, or disable a rule.',
+    parameters: {
+      type: 'object',
+      properties: {
+        rule_id: { type: 'string' },
+        days: { type: 'integer', minimum: 1, maximum: 60 },
+      },
+      required: ['rule_id'],
+    },
+  },
+  scopes: ['nightly_nudge'],
+  handler: async (args) => {
+    const ruleId = asString(args.rule_id, 100);
+    if (!ruleId) return { error: 'rule_id required' };
+    const days = clampInt(args.days, 1, 60, 14);
+    const since = Date.now() - days * 86_400_000;
+    return withDb(async (db) => {
+      const r = await db.getFirstAsync<{
+        fired: number;
+        acted: number;
+        dismissed: number;
+        avg_score_delta: number | null;
+        helpful_up: number;
+        helpful_down: number;
+      }>(
+        `SELECT
+            COUNT(*) AS fired,
+            SUM(CASE WHEN user_action='acted'     THEN 1 ELSE 0 END) AS acted,
+            SUM(CASE WHEN user_action='dismissed' THEN 1 ELSE 0 END) AS dismissed,
+            AVG(score_delta) AS avg_score_delta,
+            SUM(CASE WHEN user_helpful= 1 THEN 1 ELSE 0 END) AS helpful_up,
+            SUM(CASE WHEN user_helpful=-1 THEN 1 ELSE 0 END) AS helpful_down
+         FROM nudges_log
+         WHERE rule_id = ? AND ts >= ?`,
+        [ruleId, since],
+      );
+      return {
+        rule_id: ruleId,
+        window_days: days,
+        fired: r?.fired ?? 0,
+        acted: r?.acted ?? 0,
+        dismissed: r?.dismissed ?? 0,
+        avg_score_delta: r?.avg_score_delta ?? null,
+        helpful_up: r?.helpful_up ?? 0,
+        helpful_down: r?.helpful_down ?? 0,
+      };
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'create_rule',
+    description:
+      'Create a new LLM-generated rule (source="llm", enabled=1). Only call if the predicted ' +
+      'impact is meaningful (score >= 0.15) and the rule is grounded in one or more memories ' +
+      '(pass their ids in based_on_memory_ids). trigger and action must be valid JSON strings ' +
+      'matching one of the shapes documented in rules/engine.ts.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Short human-readable label' },
+        trigger: { type: 'string', description: 'JSON-encoded trigger condition' },
+        action: { type: 'string', description: 'JSON-encoded action {level, message}' },
+        cooldown_min: { type: 'integer', minimum: 5, maximum: 1440 },
+        predicted_impact_score: { type: 'number', minimum: 0, maximum: 1 },
+        based_on_memory_ids: { type: 'array', items: { type: 'string' } },
+      },
+      required: [
+        'name',
+        'trigger',
+        'action',
+        'cooldown_min',
+        'predicted_impact_score',
+        'based_on_memory_ids',
+      ],
+    },
+  },
+  scopes: ['nightly_nudge'],
+  handler: async (args) => {
+    const name = asString(args.name, 200);
+    const trigger = asString(args.trigger, 4000);
+    const action = asString(args.action, 4000);
+    if (!name || !trigger || !action) {
+      return { error: 'name/trigger/action required' };
+    }
+    try {
+      JSON.parse(trigger);
+      JSON.parse(action);
+    } catch {
+      return { error: 'trigger and action must be valid JSON' };
+    }
+    const impact = clampNum(args.predicted_impact_score, 0, 1, 0);
+    if (impact < 0.15) {
+      return { error: `predicted_impact_score=${impact} below threshold 0.15` };
+    }
+    const memIds = Array.isArray(args.based_on_memory_ids)
+      ? args.based_on_memory_ids.filter((x): x is string => typeof x === 'string').slice(0, 20)
+      : [];
+    if (memIds.length === 0) {
+      return { error: 'based_on_memory_ids must have at least one memory id' };
+    }
+    const cd = clampInt(args.cooldown_min, 5, 1440, 60);
+    const id = uuid();
+    const now = Date.now();
+    await withDb(async (db) => {
+      await db.runAsync(
+        `INSERT INTO rules
+           (id, name, enabled, trigger, action, cooldown_min, source,
+            predicted_impact_score, based_on_memory_ids, last_refined_ts)
+         VALUES (?, ?, 1, ?, ?, ?, 'llm', ?, ?, ?)`,
+        [id, name, trigger, action, cd, impact, JSON.stringify(memIds), now],
+      );
+    });
+    return { id, name, enabled: true, source: 'llm', predicted_impact_score: impact };
+  },
+});
+
+add({
+  def: {
+    name: 'update_rule',
+    description:
+      'Patch an existing LLM-generated rule (source="llm" only). Use to loosen/tighten ' +
+      'cooldown, change trigger or action JSON, or update predicted_impact_score. ' +
+      'Stamps last_refined_ts. Will refuse on user/seed rules.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        trigger: { type: 'string', description: 'JSON-encoded trigger' },
+        action: { type: 'string', description: 'JSON-encoded action' },
+        cooldown_min: { type: 'integer', minimum: 5, maximum: 1440 },
+        predicted_impact_score: { type: 'number', minimum: 0, maximum: 1 },
+      },
+      required: ['id'],
+    },
+  },
+  scopes: ['nightly_nudge'],
+  handler: async (args) => {
+    const id = asString(args.id, 100);
+    if (!id) return { error: 'id required' };
+    return withDb(async (db) => {
+      const row = await db.getFirstAsync<{ source: string }>(
+        `SELECT source FROM rules WHERE id = ?`,
+        [id],
+      );
+      if (!row) return { error: 'rule not found' };
+      if (row.source !== 'llm') {
+        return { error: `cannot edit ${row.source} rules; only source='llm' is editable here` };
+      }
+      const sets: string[] = [];
+      const vals: (string | number)[] = [];
+      const name = asString(args.name, 200);
+      if (name) {
+        sets.push('name = ?');
+        vals.push(name);
+      }
+      const trigger = asString(args.trigger, 4000);
+      if (trigger) {
+        try {
+          JSON.parse(trigger);
+        } catch {
+          return { error: 'trigger must be valid JSON' };
+        }
+        sets.push('trigger = ?');
+        vals.push(trigger);
+      }
+      const action = asString(args.action, 4000);
+      if (action) {
+        try {
+          JSON.parse(action);
+        } catch {
+          return { error: 'action must be valid JSON' };
+        }
+        sets.push('action = ?');
+        vals.push(action);
+      }
+      if (typeof args.cooldown_min === 'number' || typeof args.cooldown_min === 'string') {
+        sets.push('cooldown_min = ?');
+        vals.push(clampInt(args.cooldown_min, 5, 1440, 60));
+      }
+      if (typeof args.predicted_impact_score === 'number') {
+        sets.push('predicted_impact_score = ?');
+        vals.push(clampNum(args.predicted_impact_score, 0, 1, 0));
+      }
+      if (sets.length === 0) return { error: 'no fields to update' };
+      sets.push('last_refined_ts = ?');
+      vals.push(Date.now());
+      vals.push(id);
+      const r = await db.runAsync(
+        `UPDATE rules SET ${sets.join(', ')} WHERE id = ?`,
+        vals,
+      );
+      return { id, changed: r.changes };
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'disable_rule',
+    description:
+      'Soft-disable an LLM-generated rule (source="llm" only). Sets enabled=0 and stores a ' +
+      'short reason (e.g. "negative score_delta over 14d"). Will refuse on user/seed rules.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        reason: { type: 'string' },
+      },
+      required: ['id', 'reason'],
+    },
+  },
+  scopes: ['nightly_nudge'],
+  handler: async (args) => {
+    const id = asString(args.id, 100);
+    const reason = asString(args.reason, 500);
+    if (!id || !reason) return { error: 'id and reason required' };
+    return withDb(async (db) => {
+      const row = await db.getFirstAsync<{ source: string }>(
+        `SELECT source FROM rules WHERE id = ?`,
+        [id],
+      );
+      if (!row) return { error: 'rule not found' };
+      if (row.source !== 'llm') {
+        return { error: `cannot disable ${row.source} rules from this scope` };
+      }
+      await db.runAsync(
+        `UPDATE rules SET enabled = 0, disabled_reason = ?, last_refined_ts = ? WHERE id = ?`,
+        [reason, Date.now(), id],
+      );
+      return { id, disabled: true, reason };
     });
   },
 });

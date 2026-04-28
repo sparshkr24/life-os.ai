@@ -44,8 +44,10 @@ import { loadRawEventsForDate, MAX_EVENTS_FOR_MEMORY } from './rawEvents';
 
 const MEMORY_TOOL_LOOPS = 8;
 const PROFILE_TOOL_LOOPS = 4;
+const NUDGE_TOOL_LOOPS = 6;
 const MEMORY_MAX_OUTPUT_TOKENS = 2048;
 const PROFILE_MAX_OUTPUT_TOKENS = 4096;
+const NUDGE_MAX_OUTPUT_TOKENS = 2048;
 const META_KEY_LAST_NIGHTLY = 'last_nightly_ts';
 
 export interface NightlyReport {
@@ -53,6 +55,7 @@ export interface NightlyReport {
   yesterday: string;
   memory: PassReport;
   profile: PassReport;
+  nudge: PassReport;
   ok: boolean;
   durationMs: number;
 }
@@ -161,6 +164,7 @@ export async function runNightlyRebuild(): Promise<NightlyReport> {
     yesterday,
     memory: { ...EMPTY_PASS },
     profile: { ...EMPTY_PASS },
+    nudge: { ...EMPTY_PASS },
     ok: false,
     durationMs: 0,
   };
@@ -178,15 +182,24 @@ export async function runNightlyRebuild(): Promise<NightlyReport> {
 
     // Profile rebuild only proceeds if memory pass didn't burn the cap.
     if (report.memory.skipped === 'cost_cap') {
-      console.log('[nightly] cap hit during memory pass, skipping profile rebuild');
+      console.log('[nightly] cap hit during memory pass, skipping profile + nudge passes');
     } else {
       report.profile = await runProfilePass(yesterday);
+      // Nudge pass needs the just-written profile; skip if profile failed
+      // or the cap is exhausted.
+      if (report.profile.skipped === 'cost_cap') {
+        console.log('[nightly] cap hit during profile pass, skipping nudge pass');
+      } else if (!report.profile.ok) {
+        console.log('[nightly] profile pass did not succeed, skipping nudge pass');
+      } else {
+        report.nudge = await runNudgePass(yesterday);
+      }
     }
 
-    if (report.memory.ok || report.profile.ok) {
+    if (report.memory.ok || report.profile.ok || report.nudge.ok) {
       await markNightlyComplete(startedAt);
     }
-    report.ok = report.memory.ok && report.profile.ok;
+    report.ok = report.memory.ok && report.profile.ok && report.nudge.ok;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error('[nightly] failed:', message);
@@ -195,7 +208,7 @@ export async function runNightlyRebuild(): Promise<NightlyReport> {
 
   report.durationMs = Date.now() - startedAt;
   console.log(
-    `[nightly] yesterday=${yesterday} memory=${describePass(report.memory)} profile=${describePass(report.profile)} totalMs=${report.durationMs}`,
+    `[nightly] yesterday=${yesterday} memory=${describePass(report.memory)} profile=${describePass(report.profile)} nudge=${describePass(report.nudge)} totalMs=${report.durationMs}`,
   );
   return report;
 }
@@ -455,6 +468,214 @@ function buildProfileUserPrompt(yesterday: string, input: ProfilePassInputs): st
   lines.push('');
   lines.push(
     'Use the read tools to dig deeper into any memory or rollup if you need to. When done, return ONLY the merged behavior_profile.data JSON.',
+  );
+  return lines.join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Pass 3 — nudge rules (Stage 14)
+// ────────────────────────────────────────────────────────────────────────────
+
+const NUDGE_SYSTEM_PROMPT = `You are the on-device nudge-rule curator for a single-user life-OS. You run AFTER the memory pass and the profile pass. Your job is to keep the user's nudge rules sharp and personalised: create new ones grounded in causal memories, refine existing LLM-generated rules based on observed effectiveness, and disable ones that are demonstrably annoying or net-negative.
+
+You have these write tools (LLM-rules ONLY — refuses on user/seed rules):
+  - create_rule({name, trigger, action, cooldown_min, predicted_impact_score, based_on_memory_ids})
+  - update_rule({id, ...patch})
+  - disable_rule({id, reason})
+
+Read tools (use freely):
+  - list_rules({source?, enabled?})  — see what already exists
+  - get_rule_effectiveness({rule_id, days})  — fired/acted/dismissed counts, avg score_delta, helpful_up/down
+  - search_memories, get_memory, get_profile, get_recent_nudges, get_recent_rollups, etc.
+
+Trigger shapes the engine understands (use ONE per rule, JSON-encoded as a string):
+
+  { "app": "<pkg>", "after_local": "HH:MM", "threshold_min_today": <int> }
+    → Today's foreground time on app ≥ threshold AND wall-clock ≥ after_local
+
+  { "after_event": "wake", "within_sec": <int>, "app_any": ["<pkg>", ...] }
+    → An app from app_any opened within within_sec of today's wake_ts
+
+  { "between_local": ["HH:MM","HH:MM"], "category": "productive"|"neutral"|"unproductive",
+    "threshold_min_today": <int>, "location": "<place_label>" }
+    → Wall-clock in window AND today's category minutes ≥ threshold AND user inside place
+
+Action shape: { "level": 1|2|3, "message": "<short, second-person, action-oriented>" }
+  level 1 = silent, 2 = heads-up, 3 = modal. Default to 2 unless extreme.
+
+Workflow:
+  1. List existing LLM rules via list_rules({source:"llm"}).
+  2. For each, call get_rule_effectiveness({rule_id, days:14}).
+       - avg_score_delta > 0 AND helpful_up > helpful_down → keep; consider raising cooldown if fired > 7×.
+       - avg_score_delta < 0 OR helpful_down >> helpful_up → disable_rule with one-line reason.
+       - mixed → update_rule to narrow trigger (raise threshold, tighter time window) and lower predicted_impact_score.
+  3. Search memories for unprotected high-impact patterns. For each new actionable pattern with abs(impact_score) ≥ 0.15 AND confidence ≥ 0.5 that is NOT already covered by an existing rule, call create_rule with a trigger derived from the memory's cause and action targeting the effect. Pass the source memory id(s) in based_on_memory_ids.
+  4. Do NOT create more than 4 new rules per night. Quality over quantity.
+  5. NEVER call create_rule with predicted_impact_score < 0.15 — the tool will reject it.
+
+Hard rules:
+  - You CANNOT create or modify user/seed rules. The tools refuse — don't waste turns.
+  - Every create_rule MUST cite at least one memory id in based_on_memory_ids.
+  - Use second-person message text ("You've spent…") not third-person.
+  - Reply with a brief plain-text summary of what you did. No JSON.`;
+
+async function runNudgePass(yesterday: string): Promise<PassReport> {
+  const report: PassReport = { ...EMPTY_PASS };
+  try {
+    const inputs = await loadNudgePassInputs();
+    const userPrompt = buildNudgeUserPrompt(yesterday, inputs);
+
+    const finalText = await runToolLoop({
+      scope: 'nightly_nudge',
+      system: NUDGE_SYSTEM_PROMPT,
+      userPrompt,
+      maxLoops: NUDGE_TOOL_LOOPS,
+      maxOutputTokens: NUDGE_MAX_OUTPUT_TOKENS,
+      report,
+    });
+
+    if (finalText !== null) {
+      report.ok = true;
+      console.log(`[nightly:nudge] ${finalText.slice(0, 240)}`);
+    }
+  } catch (e) {
+    report.error = e instanceof Error ? e.message : String(e);
+    console.error('[nightly:nudge] failed:', report.error);
+  }
+  return report;
+}
+
+interface NudgePassInputs {
+  profile: unknown;
+  llmRules: Array<{
+    id: string;
+    name: string;
+    enabled: number;
+    trigger: string;
+    action: string;
+    cooldown_min: number;
+    predicted_impact_score: number | null;
+    based_on_memory_ids: string | null;
+    disabled_reason: string | null;
+  }>;
+  topActionableMemories: Array<{
+    id: string;
+    type: string;
+    summary: string;
+    cause: string | null;
+    effect: string | null;
+    impact_score: number;
+    confidence: number;
+    occurrences: number;
+    tags: string;
+  }>;
+  recentNudgeStats: {
+    last14d_fired: number;
+    last14d_acted: number;
+    last14d_dismissed: number;
+    last14d_helpful_up: number;
+    last14d_helpful_down: number;
+  };
+}
+
+async function loadNudgePassInputs(): Promise<NudgePassInputs> {
+  return withDb(async (db) => {
+    const profileRow = await db.getFirstAsync<{ data: string } | null>(
+      `SELECT data FROM behavior_profile WHERE id = 1`,
+    );
+    const profile = profileRow ? safeParse(profileRow.data) : {};
+
+    const llmRules = await db.getAllAsync<{
+      id: string;
+      name: string;
+      enabled: number;
+      trigger: string;
+      action: string;
+      cooldown_min: number;
+      predicted_impact_score: number | null;
+      based_on_memory_ids: string | null;
+      disabled_reason: string | null;
+    }>(
+      `SELECT id, name, enabled, trigger, action, cooldown_min,
+              predicted_impact_score, based_on_memory_ids, disabled_reason
+       FROM rules
+       WHERE source = 'llm'`,
+    );
+
+    const topActionableMemories = await db.getAllAsync<{
+      id: string;
+      type: string;
+      summary: string;
+      cause: string | null;
+      effect: string | null;
+      impact_score: number;
+      confidence: number;
+      occurrences: number;
+      tags: string;
+    }>(
+      `SELECT id, type, summary, cause, effect, impact_score, confidence, occurrences, tags
+       FROM memories
+       WHERE archived_ts IS NULL
+         AND ABS(impact_score) >= 0.15
+         AND confidence >= 0.5
+         AND (type = 'causal' OR type = 'habit' OR type = 'prediction')
+       ORDER BY (ABS(impact_score) * confidence) DESC
+       LIMIT 30`,
+    );
+
+    const since = Date.now() - 14 * 86_400_000;
+    const stats = await db.getFirstAsync<{
+      last14d_fired: number;
+      last14d_acted: number;
+      last14d_dismissed: number;
+      last14d_helpful_up: number;
+      last14d_helpful_down: number;
+    }>(
+      `SELECT
+          COUNT(*) AS last14d_fired,
+          SUM(CASE WHEN user_action='acted'     THEN 1 ELSE 0 END) AS last14d_acted,
+          SUM(CASE WHEN user_action='dismissed' THEN 1 ELSE 0 END) AS last14d_dismissed,
+          SUM(CASE WHEN user_helpful= 1 THEN 1 ELSE 0 END) AS last14d_helpful_up,
+          SUM(CASE WHEN user_helpful=-1 THEN 1 ELSE 0 END) AS last14d_helpful_down
+       FROM nudges_log
+       WHERE ts >= ?`,
+      [since],
+    );
+
+    return {
+      profile,
+      llmRules,
+      topActionableMemories,
+      recentNudgeStats: {
+        last14d_fired: stats?.last14d_fired ?? 0,
+        last14d_acted: stats?.last14d_acted ?? 0,
+        last14d_dismissed: stats?.last14d_dismissed ?? 0,
+        last14d_helpful_up: stats?.last14d_helpful_up ?? 0,
+        last14d_helpful_down: stats?.last14d_helpful_down ?? 0,
+      },
+    };
+  });
+}
+
+function buildNudgeUserPrompt(yesterday: string, input: NudgePassInputs): string {
+  const lines: string[] = [];
+  lines.push(`YESTERDAY: ${yesterday}`);
+  lines.push('');
+  lines.push('PROFILE (just rebuilt):');
+  lines.push(JSON.stringify(input.profile ?? {}, null, 2));
+  lines.push('');
+  lines.push(`EXISTING_LLM_RULES (${input.llmRules.length}):`);
+  lines.push(JSON.stringify(input.llmRules, null, 2));
+  lines.push('');
+  lines.push(`TOP_ACTIONABLE_MEMORIES (${input.topActionableMemories.length}):`);
+  lines.push(JSON.stringify(input.topActionableMemories, null, 2));
+  lines.push('');
+  lines.push('NUDGE_STATS_LAST_14D:');
+  lines.push(JSON.stringify(input.recentNudgeStats, null, 2));
+  lines.push('');
+  lines.push(
+    'For each existing LLM rule, call get_rule_effectiveness({rule_id, days:14}) before deciding to keep/refine/disable. ' +
+      'Then create at most 4 new rules grounded in the highest-impact unprotected memories. Reply with a one-paragraph summary.',
   );
   return lines.join('\n');
 }

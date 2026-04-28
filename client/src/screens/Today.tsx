@@ -28,7 +28,6 @@ import { runAggregatorTick } from '../aggregator';
 import { aggregatorTaskStatus } from '../aggregator/worker';
 import { evaluateRules } from '../rules/engine';
 import { lastRulesTickTs } from '../rules/worker';
-import { runSmartNudgeTick } from '../brain/smartNudge';
 import { runNightlyRebuild, lastNightlyTs } from '../brain/nightly';
 import { useToast } from '../toast';
 import {
@@ -378,22 +377,6 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             }}
           />
           <SystemRow
-            title="Smart nudge"
-            subtitle="gpt-4o-mini · 15 min"
-            tail={`$${spend.toFixed(4)} today`}
-            cta="Run smart nudge now"
-            onPress={async () => {
-              await run('smart', async () => {
-                const r = await runSmartNudgeTick();
-                if (r.error) toast.error('smart: ' + r.error);
-                else if (r.skipped) toast.ok(`smart skipped (${r.skipped})`);
-                else if (r.fired) toast.ok(`smart fired L${r.level} · $${r.costUsd.toFixed(5)}`);
-                else toast.ok(`smart no-nudge · $${r.costUsd.toFixed(5)}`);
-              });
-              await refresh();
-            }}
-          />
-          <SystemRow
             title="Nightly profile"
             subtitle="claude-sonnet · 03:00"
             tail={nightly ? fmtTime(nightly) : 'never'}
@@ -401,13 +384,16 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             onPress={async () => {
               await run('nightly', async () => {
                 const result = await runNightlyRebuild();
-                const firstError = result.memory.error ?? result.profile.error;
-                const firstSkip = result.memory.skipped ?? result.profile.skipped;
-                const totalCost = result.memory.costUsd + result.profile.costUsd;
+                const firstError =
+                  result.memory.error ?? result.profile.error ?? result.nudge.error;
+                const firstSkip =
+                  result.memory.skipped ?? result.profile.skipped ?? result.nudge.skipped;
+                const totalCost =
+                  result.memory.costUsd + result.profile.costUsd + result.nudge.costUsd;
                 if (firstError) toast.error('nightly: ' + firstError);
                 else if (firstSkip) toast.ok(`nightly skipped (${firstSkip})`);
                 else if (result.ok)
-                  toast.ok(`nightly ok · mem+prof · $${totalCost.toFixed(4)}`);
+                  toast.ok(`nightly ok · mem+prof+nudge · $${totalCost.toFixed(4)}`);
               });
               await refresh();
             }}

@@ -15,11 +15,11 @@
 import { withDb } from '../db';
 import { cleanupRawEvents } from '../ingest/cleanup';
 import { computeProductivityScore } from '../brain/productivityScore';
+import { maybeRebuildPredictiveInsights } from '../brain/predictiveInsights';
 import { rebuildDailyRollup } from './rollup';
 import { classifySilences } from './silence';
 import { foldMonth } from './monthlyFold';
 import { runRulesOnceFromBackground } from '../rules/worker';
-import { runSmartNudgeTick } from '../brain/smartNudge';
 import { maybeRunNightlyWatchdog } from '../brain/nightly';
 import { deviceTz, localDateStr, localMonthStr, prevDate } from './time';
 
@@ -60,6 +60,20 @@ export async function runAggregatorTick(): Promise<TickReport> {
       const scoreToday = await computeProductivityScore(db, today);
       const scoreYesterday = await computeProductivityScore(db, yesterday);
 
+      // Stage 14 prep: pure-RAG predictive insights for today. Throttled
+      // to once per ~90 min internally; safe to call every tick.
+      try {
+        const ins = await maybeRebuildPredictiveInsights(db, today);
+        if (ins.ran) {
+          console.log(`[aggregator] predictive-insights count=${ins.count}`);
+        }
+      } catch (e) {
+        console.error(
+          '[aggregator] predictive-insights crashed:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
       const monthFolded = await maybeFoldMonth(db, t0, tz);
 
       await db.runAsync(
@@ -69,18 +83,10 @@ export async function runAggregatorTick(): Promise<TickReport> {
       );
 
       // Background rule eval — fires nudges even when the app is killed.
-      // The 60s foreground loop covers active sessions.
+      // The 60s foreground loop covers active sessions. Stage 14 made the
+      // rules themselves LLM-curated nightly, so the old smart-nudge tick
+      // is gone — no per-tick LLM call here.
       await runRulesOnceFromBackground();
-
-      // Stage 7: smart-nudge tick (gpt-4o-mini). Internally cost-cap +
-      // cooldown gated; never throws. Fire-and-forget from this tick's
-      // perspective — we await so its errors land in our log line, but a
-      // failure here doesn't fail the aggregator tick.
-      try {
-        await runSmartNudgeTick();
-      } catch (e) {
-        console.error('[aggregator] smart-nudge crashed:', e instanceof Error ? e.message : String(e));
-      }
 
       // Stage 8: nightly profile rebuild watchdog. Runs Sonnet at most
       // once per ~24h, only after 03:00 local. Cheap when not due.
