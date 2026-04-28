@@ -21,14 +21,47 @@ object EventDb {
   private const val TAG = "LifeOsEventDb"
 
   fun insert(ctx: Context, kind: String, ts: Long, payloadJson: String) {
+    insertReturningId(ctx, kind, ts, payloadJson)
+  }
+
+  /**
+   * Same as [insert] but returns the inserted row id, or -1 on failure.
+   * Used by callers that need to UPDATE the row later (e.g. ongoing-notif
+   * tracker stamping `end_ts` when the notification is dismissed).
+   */
+  fun insertReturningId(ctx: Context, kind: String, ts: Long, payloadJson: String): Long {
+    val db = open(ctx) ?: return -1L
+    val stamped = PhoneState.stamp(payloadJson)
+    return try {
+      val cv = android.content.ContentValues().apply {
+        put("ts", ts)
+        put("kind", kind)
+        put("payload", stamped)
+      }
+      db.insert("events", null, cv)
+    } catch (e: Exception) {
+      Log.e(TAG, "insert kind=$kind failed: ${e.message}")
+      -1L
+    } finally {
+      try { db.close() } catch (_: Exception) { /* ignore */ }
+    }
+  }
+
+  /**
+   * Replace the payload of an existing event. Used by the notification
+   * listener to stamp `end_ts` + `duration_ms` onto an ongoing-notif row
+   * once it's dismissed, instead of inserting a second event.
+   */
+  fun updatePayload(ctx: Context, id: Long, payloadJson: String) {
+    if (id <= 0) return
     val db = open(ctx) ?: return
     try {
       db.execSQL(
-        "INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)",
-        arrayOf<Any>(ts, kind, payloadJson)
+        "UPDATE events SET payload = ? WHERE id = ?",
+        arrayOf<Any>(payloadJson, id)
       )
     } catch (e: Exception) {
-      Log.e(TAG, "insert kind=$kind failed: ${e.message}")
+      Log.e(TAG, "updatePayload id=$id failed: ${e.message}")
     } finally {
       try { db.close() } catch (_: Exception) { /* ignore */ }
     }

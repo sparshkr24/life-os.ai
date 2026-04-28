@@ -61,6 +61,10 @@ class LifeOsForegroundService : Service() {
     super.onCreate()
     Log.i(TAG, "onCreate")
 
+    // Initialise process-wide ambient state listeners FIRST so any event
+    // written during the rest of onCreate gets stamped.
+    PhoneState.init(this)
+
     val nm = getSystemService(NotificationManager::class.java)
     nm.createNotificationChannel(
       NotificationChannel(CHANNEL_ID, "Life OS background", NotificationManager.IMPORTANCE_LOW)
@@ -249,7 +253,7 @@ class LifeOsForegroundService : Service() {
             if (!extendRecentSession(db, pkg, ts)) {
               db.execSQL(
                 "INSERT INTO events (ts, kind, payload) VALUES (?, 'app_fg', ?)",
-                arrayOf<Any>(ts, buildPayload(pkg, ts, ts))
+                arrayOf<Any>(ts, PhoneState.stamp(buildPayload(pkg, ts, ts)))
               )
               inserted++
             } else {

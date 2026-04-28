@@ -29,6 +29,9 @@ class GeofenceReceiver : BroadcastReceiver() {
     val triggering = event.triggeringGeofences ?: return
     for (g in triggering) {
       val placeId = g.requestId
+      // Mirror place transitions into PhoneState so subsequent events get
+      // stamped with where the user is. No fresh GPS fix — just bookkeeping.
+      PhoneState.placeId = if (kind == "geo_enter") placeId else null
       val loc = event.triggeringLocation
       val lat = loc?.latitude ?: 0.0
       val lng = loc?.longitude ?: 0.0
