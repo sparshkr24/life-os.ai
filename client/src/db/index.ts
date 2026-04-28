@@ -284,6 +284,16 @@ async function runMigrate(): Promise<number> {
     await addColumnIfMissing(db, 'nudges_log', 'baseline_score', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'score_delta', 'REAL');
     await addColumnIfMissing(db, 'nudges_log', 'user_helpful', 'INTEGER');
+    // v5 — app_categories enrichment fields (LLM nightly enrichment + auto-discovery).
+    await addColumnIfMissing(db, 'app_categories', 'subcategory', 'TEXT');
+    await addColumnIfMissing(
+      db,
+      'app_categories',
+      'enriched',
+      'INTEGER NOT NULL DEFAULT 0',
+    );
+    await addColumnIfMissing(db, 'app_categories', 'last_categorized_ts', 'INTEGER');
+    await addColumnIfMissing(db, 'app_categories', 'details', 'TEXT');
     if (currentVersion < SCHEMA_VERSION) {
       await db.runAsync(
         `INSERT INTO schema_meta (key, value) VALUES ('version', ?)

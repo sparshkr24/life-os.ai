@@ -17,11 +17,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import {
   loadSnapshot,
-  setAnthropicKey,
-  setOpenAiKey,
   setDailyCap,
   type SecureSnapshot,
 } from '../secure/keys';
+import { listProviderKeys } from '../llm/keys';
 import { getProfile, todayLlmSpendUsd } from '../repos/observability';
 import type { BehaviorProfileRow } from '../db/schema';
 import { useTheme, THEME_NAMES } from '../theme';
@@ -30,25 +29,36 @@ import { ActionButton, fmtTime, makeStyles, useAsyncRunner } from './shared';
 import { PermissionsCard } from './PermissionsCard';
 import { SectionHeader, StatusDot } from './widgets';
 
-export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void }) {
+export function SettingsScreen({
+  onOpenProfile,
+  onOpenAiModels,
+}: {
+  onOpenProfile: () => void;
+  onOpenAiModels: () => void;
+}) {
   const { theme, setTheme } = useTheme();
   const s = makeStyles(theme);
   const run = useAsyncRunner();
   const toast = useToast();
   const [snap, setSnap] = useState<SecureSnapshot | null>(null);
   const [spend, setSpend] = useState(0);
-  const [aIn, setAIn] = useState('');
-  const [oIn, setOIn] = useState('');
   const [capIn, setCapIn] = useState('');
   const [profile, setProfile] = useState<BehaviorProfileRow | null>(null);
   const [saving, setSaving] = useState(false);
+  const [keysConfigured, setKeysConfigured] = useState(false);
 
   const refresh = async () => {
     await run('settings load', async () => {
-      const [sn, p, sp] = await Promise.all([loadSnapshot(), getProfile(), todayLlmSpendUsd()]);
+      const [sn, p, sp, ks] = await Promise.all([
+        loadSnapshot(),
+        getProfile(),
+        todayLlmSpendUsd(),
+        listProviderKeys(),
+      ]);
       setSnap(sn);
       setProfile(p);
       setSpend(sp);
+      setKeysConfigured(ks.some((k) => k.hasKey));
     });
   };
   useEffect(() => {
@@ -60,16 +70,12 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
     const ok = await run(
       'save settings',
       async () => {
-        if (aIn) await setAnthropicKey(aIn);
-        if (oIn) await setOpenAiKey(oIn);
         if (capIn) await setDailyCap(Number(capIn));
         return true;
       },
       setSaving,
     );
     if (ok) {
-      setAIn('');
-      setOIn('');
       setCapIn('');
       toast.ok('Saved');
       await refresh();
@@ -135,38 +141,26 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
       <SectionHeader>Tracking permissions</SectionHeader>
       <PermissionsCard />
 
-      {/* API KEYS */}
-      <SectionHeader>API keys</SectionHeader>
-      <View style={s.card}>
-        <Text style={[s.body2, { fontWeight: '700' }]}>Anthropic (Sonnet)</Text>
-        <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
-          {snap?.anthropicSet ? `set · ${snap.anthropicTail}` : 'not set'}
-        </Text>
-        <TextInput
-          placeholder="sk-ant-…"
-          placeholderTextColor={theme.inputPlaceholder}
-          value={aIn}
-          onChangeText={setAIn}
-          secureTextEntry
-          autoCapitalize="none"
-          style={s.input}
-        />
-      </View>
-      <View style={s.card}>
-        <Text style={[s.body2, { fontWeight: '700' }]}>OpenAI (gpt-4o-mini)</Text>
-        <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
-          {snap?.openaiSet ? `set · ${snap.openaiTail}` : 'not set'}
-        </Text>
-        <TextInput
-          placeholder="sk-…"
-          placeholderTextColor={theme.inputPlaceholder}
-          value={oIn}
-          onChangeText={setOIn}
-          secureTextEntry
-          autoCapitalize="none"
-          style={s.input}
-        />
-      </View>
+      {/* AI MODELS — navigates to AiModels screen for providers + routing */}
+      <SectionHeader>AI models</SectionHeader>
+      <Pressable onPress={onOpenAiModels}>
+        <View style={s.card}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.body2, { fontWeight: '700' }]}>Providers &amp; routing</Text>
+              <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+                {keysConfigured ? 'configured' : 'add OpenAI / OpenRouter keys'}
+              </Text>
+            </View>
+            <Text style={[s.tdMono, { color: theme.accent, fontWeight: '700' }]}>Open →</Text>
+          </View>
+        </View>
+      </Pressable>
 
       {/* COST & LIMITS */}
       <SectionHeader>Cost &amp; limits</SectionHeader>

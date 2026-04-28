@@ -8,9 +8,17 @@
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
+ * v5 (2026-04-28) — additive only.
+ *  - app_categories.subcategory          TEXT     (e.g. 'social_media', 'video_streaming')
+ *  - app_categories.enriched             INTEGER  (0/1, 1 once LLM has filled metadata)
+ *  - app_categories.last_categorized_ts  INTEGER  (when LLM last touched the row)
+ *  - app_categories.details              TEXT     (JSON: publisher, description, official_site, ...)
+ *  - app_categories.source 'discovered' is a new sentinel for pkgs auto-added
+ *    by the aggregator when seen in events but not seeded.
+ * Applied via `addColumnIfMissing`. No DROP, no RENAME.
  * v4 (2026-04-28) — additive only. Stage 12 (Intelligence Evolution).
  *  - new table `memories`: derived patterns/predictions with embeddings.
  *  - embedding column is JSON-encoded float[] (1536-dim, text-embedding-3-small).
@@ -133,7 +141,11 @@ export const PHONE_SCHEMA_SQL: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS app_categories (
     pkg TEXT PRIMARY KEY,
     category TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'seed'
+    source TEXT NOT NULL DEFAULT 'seed',
+    subcategory TEXT,
+    enriched INTEGER NOT NULL DEFAULT 0,
+    last_categorized_ts INTEGER,
+    details TEXT
   );`,
 
   // schema version + arbitrary KV (last_nightly_ts, last_aggregator_ts, ...).
@@ -196,6 +208,16 @@ export type EventKind =
   | 'user_clarification';
 
 export type AppCategory = 'productive' | 'neutral' | 'unproductive';
+
+/**
+ * Fine-grained category. Free-form on purpose — the LLM picks the best label
+ * from common ones rather than us locking a hard enum that goes stale every
+ * year. Encourage these in the prompt: social_media, messaging, video_streaming,
+ * music, gaming, news, reading, learning, productivity, work_communication,
+ * dev_tools, finance, shopping, travel, navigation, health, fitness, dating,
+ * browser, system, utility, photography, content_creation, generative_ai.
+ */
+export type AppSubcategory = string;
 export type TodoStatus = 'open' | 'done' | 'snoozed' | 'dropped';
 export type RemindStrategy = 'fixed' | 'context' | 'none';
 export type NudgeSource = 'rule' | 'smart' | 'todo';
@@ -279,7 +301,16 @@ export interface LlmCallRow {
 export interface AppCategoryRow {
   pkg: string;
   category: AppCategory;
-  source: 'seed' | 'user';
+  /** 'seed' = built-in, 'user' = manually set, 'discovered' = auto-added when seen in events, 'llm' = LLM-enriched. */
+  source: 'seed' | 'user' | 'discovered' | 'llm';
+  /** v5. Fine-grained class (e.g. 'social_media'). NULL until enrichment runs. */
+  subcategory: AppSubcategory | null;
+  /** v5. 1 once the LLM has filled in subcategory + details. */
+  enriched: 0 | 1;
+  /** v5. Last time the LLM touched this row (epoch ms). */
+  last_categorized_ts: number | null;
+  /** v5. Free-form JSON: {publisher?, description?, official_site?, ...}. */
+  details: string | null;
 }
 
 export interface PlaceRow {

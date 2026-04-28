@@ -22,7 +22,7 @@ import type { EventRow } from '../db/schema';
 import { useTheme, type ThemeTokens } from '../theme';
 import { useToast } from '../toast';
 
-export type TabId = 'today' | 'observe' | 'chat' | 'profile' | 'settings';
+export type TabId = 'today' | 'observe' | 'chat' | 'profile' | 'settings' | 'aimodels';
 
 export const fmtTime = (ts: number): string => new Date(ts).toLocaleString();
 export const fmtTimeShort = (ts: number): string =>
@@ -69,13 +69,25 @@ export function fmtDur(ms: number): string {
  * Parsed event payload. The Kotlin foreground service writes
  * `{pkg, start_ts, end_ts, duration_ms, source}` for app_fg events.
  * Older rows (pre-dedup) only have `pkg`. We tolerate both.
+ *
+ * v3: every event payload also carries a `_ctx` block stamped by
+ * `PhoneState.stamp` at insert time: `{place_id?, batt?, charging?, net?,
+ * audio?}`. Surfaced here so any debug screen / tool can show it.
  */
+export interface PhoneCtx {
+  placeId?: string;
+  batt?: number;
+  charging?: boolean;
+  net?: string;
+  audio?: string;
+}
 export interface ParsedEvent {
   pkg?: string;
   startTs: number;
   endTs: number;
   durationMs: number;
   source?: string;
+  ctx?: PhoneCtx;
 }
 export function parseEvent(row: EventRow): ParsedEvent {
   const v = safeJson(row.payload);
@@ -89,7 +101,19 @@ export function parseEvent(row: EventRow): ParsedEvent {
   const durationMs =
     typeof o.duration_ms === 'number' ? o.duration_ms : Math.max(0, endTs - startTs);
   const source = typeof o.source === 'string' ? o.source : undefined;
-  return { pkg, startTs, endTs, durationMs, source };
+  let ctx: PhoneCtx | undefined;
+  const rawCtx = o._ctx;
+  if (typeof rawCtx === 'object' && rawCtx !== null) {
+    const c = rawCtx as Record<string, unknown>;
+    ctx = {
+      placeId: typeof c.place_id === 'string' ? c.place_id : undefined,
+      batt: typeof c.batt === 'number' ? c.batt : undefined,
+      charging: typeof c.charging === 'boolean' ? c.charging : undefined,
+      net: typeof c.net === 'string' ? c.net : undefined,
+      audio: typeof c.audio === 'string' ? c.audio : undefined,
+    };
+  }
+  return { pkg, startTs, endTs, durationMs, source, ctx };
 }
 
 /**

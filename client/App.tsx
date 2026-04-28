@@ -27,6 +27,7 @@ import {
   ChatScreen,
   ProfileScreen,
   SettingsScreen,
+  AiModelsScreen,
   type TabId,
 } from './src/screens';
 import { ThemeProvider, useTheme } from './src/theme';
@@ -180,10 +181,19 @@ function Shell() {
         {tab === 'observe' && <ObservabilityScreen />}
         {tab === 'chat' && <ChatScreen />}
         {tab === 'profile' && <ProfileScreen onBack={() => setTab('settings')} />}
-        {tab === 'settings' && <SettingsScreen onOpenProfile={() => setTab('profile')} />}
+        {tab === 'aimodels' && <AiModelsScreen onBack={() => setTab('settings')} />}
+        {tab === 'settings' && (
+          <SettingsScreen
+            onOpenProfile={() => setTab('profile')}
+            onOpenAiModels={() => setTab('aimodels')}
+          />
+        )}
       </View>
 
-      <FloatingNav tab={tab === 'profile' ? 'settings' : tab} onTab={setTab} />
+      <FloatingNav
+        tab={tab === 'profile' || tab === 'aimodels' ? 'settings' : tab}
+        onTab={setTab}
+      />
 
       <StatusBar style={theme.statusBarStyle} />
     </View>
@@ -200,6 +210,8 @@ function tabSubtitle(t: TabId): string {
       return 'ask anything (stage 9)';
     case 'profile':
       return "the AI's model of you";
+    case 'aimodels':
+      return 'providers · routing';
     case 'settings':
       return 'theme · keys · profile';
   }

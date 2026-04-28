@@ -22,6 +22,7 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | `client/src/bridge/` | TS wrapper around the Kotlin bridge | covered by `client/src/CLAUDE.md` |
 | `client/src/screens/` | Tab screens (Today, Observe = Events+Rollups+LLM+Nudges, Chat, Settings) + Profile overlay reachable from Settings | covered by `client/src/CLAUDE.md` |
 | `client/src/secure/` | Secure-store keys + cost-cap helpers | covered by `client/src/CLAUDE.md` |
+| `client/src/llm/` | Provider-agnostic LLM dispatch (Stage 14): router, key store, model catalogue, OpenAI/Anthropic/MiniMax/DeepSeek adapters | yes |
 | `client/src/memory/` | v3 memory store: embeddings, RAG, scoring (Stage 12+) | yes |
 | `client/android/app/src/main/java/com/lifeos/` | Kotlin foreground service + bridge + boot receiver | yes |
 | `docs/` | Architecture + design docs | no (prose only) |
@@ -58,7 +59,8 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The architecture doc 
 | Stage | Status | What it delivers |
 |---|---|---|
 | 12 | **done** | **Memory store foundation.** Schema v4 adds `memories` table (id/type/summary/cause/effect/impact_score/confidence/occurrences/embedding/tags/predicted_outcome/actual_outcome/was_correct/archived_ts). New folder `client/src/memory/`: `embed.ts` (OpenAI `text-embedding-3-small`, cost-capped, logged to `llm_calls`), `store.ts` (insert/update/archive/score), `rag.ts` (cosine top-k retrieval, recency+impact+confidence re-rank). No LLM extraction or RAG-into-prompt yet — pure scaffolding. |
-| 13 | **now** | **RAG into nightly + chat + daily extraction.** New `client/src/memory/extract.ts`: once-per-day extraction (gpt-4o-mini, strict JSON, gated by `schema_meta.last_extract_date`) called from `runNightlyRebuild` for yesterday's rollup. `brain/nightly.ts` and `brain/chat.ts` both call `retrieveContext` and append the markdown memory block to their prompts; on RAG miss (no memories, embed fail, cost cap) they fall back to the v2 path unchanged. New `LlmPurpose='extract'`. |
+| 13 | **done** | **RAG into nightly + chat + daily extraction.** New `client/src/memory/extract.ts`: once-per-day extraction (gpt-4o-mini, strict JSON, gated by `schema_meta.last_extract_date`) called from `runNightlyRebuild` for yesterday's rollup. `brain/nightly.ts` and `brain/chat.ts` both call `retrieveContext` and append the markdown memory block to their prompts; on RAG miss (no memories, embed fail, cost cap) they fall back to the v2 path unchanged. New `LlmPurpose='extract'`. |
+| 14a | **done** | **Multi-provider LLM abstraction (foundation for Stage 14).** New `client/src/llm/` folder (router, key store, model catalogue, adapters for OpenAI / Anthropic / MiniMax / DeepSeek). Every chat or embedding call now flows through `runChatTask` / `runEmbedTask`; cost-cap + `llm_calls` logging consolidated in `llm/ledger.ts`. Settings → AI Models UI lets the user paste any subset of provider keys and pick which model handles each task. See `client/src/llm/CLAUDE.md`. |
 | 14 |  | **LLM-generated rules replace smart-nudge tick.** Weekly rule-generation call writes to `rules` (`source='llm'`, `based_on_memories` JSON). Rule engine executes them offline; smart-nudge tick disabled. ~96 LLM calls/day → 0. |
 | 15 |  | **Self-learning loop.** Predictions stored as memories with `predicted_outcome`. Nightly job sets `actual_outcome` + `was_correct` from rollups. Memory `confidence` updated by reinforcement/contradiction counts. |
 | 16 |  | **Pattern abstraction + merging.** Weekly consolidation pass merges similar specific memories into abstract parents (`parent_id`/`child_ids`); contradicted memories archived (soft-delete). |
@@ -116,13 +118,13 @@ adb logcat -s 'LifeOsService:*' 'LifeOsBridge:*' 'LifeOsBoot:*' 'AndroidRuntime:
 
 ## Hard rules for assistants
 
-1. **Simplicity above all.** Clean, minimal, readable code beats clever code. Prefer fewer files, fewer layers, fewer abstractions. Hard-code until duplication forces extraction. If a junior dev couldn't understand it in 30 seconds, it's wrong. **Debuggability > extensibility.**
+1. **Simplicity above all.** Write code a human can read top-to-bottom and understand on first pass. Prefer fewer lines, fewer files, fewer layers, fewer abstractions — but not at the cost of clarity. Use intuitive, fully-spelled variable and function names; 1–4 word names are fine, cryptic abbreviations are not (`r`, `m`, `pct`, `tmp` force the reader to scroll up; `rankedMemory`, `memory`, `impactPercent` don't). Hard-code until duplication forces extraction. If a junior dev couldn't understand it in 30 seconds, it's wrong. **Debuggability > extensibility.**
 2. **No `any`.** Strict TS everywhere. Fix types at the source, don't cast.
 3. **No future-stage installs.** Only add deps the current stage needs.
 4. **No abstractions for one call site.** Inline until the second use proves a pattern.
 5. **No tutorial comments.** Comments explain *why*, not *what*.
 6. **Local-first, no server.** Do not propose, recreate, or reintroduce a backend. All state lives in `<filesDir>/SQLite/lifeos.db`.
-7. **No raw events to LLMs.** LLM calls receive `behavior_profile` + rollups only.
+7. **Raw events go to ONE LLM call only: `runMemoryPass` inside `brain/nightly.ts`.** That pass receives yesterday's full event timeline (ts, kind, source, payload + the `_ctx` ambient block stamped at insert time — place, battery, charging, network, audio, weekday, etc.) so memories are precise and personalised. Every other LLM surface (chat, profile pass, smart-nudge) sees `behavior_profile` + rollups + memory context (via RAG) — never raw events.
 8. **Schema is JS-owned.** Kotlin only does INSERT/SELECT against columns defined in `client/src/db/schema.ts`. When you change `schema.ts`, grep Kotlin for affected column names in the same commit.
 9. **Cost cap is a hard wall.** Every LLM call checks today's `llm_calls.cost_usd` sum first.
 10. **CLAUDE.md is read before editing and updated after.** Non-negotiable.

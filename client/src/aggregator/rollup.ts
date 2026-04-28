@@ -150,7 +150,18 @@ export async function aggApps(
     [dayStart, dayEnd],
   );
   if (rows.length === 0) return [];
+  // Auto-discover: any pkg we just saw in events but don't yet classify gets
+  // a placeholder row with category='neutral'. Nightly LLM enrichment fills
+  // in subcategory/details and may flip category. INSERT OR IGNORE keeps
+  // existing user/llm classifications untouched.
   const placeholders = rows.map(() => '?').join(',');
+  for (const r of rows) {
+    await db.runAsync(
+      `INSERT OR IGNORE INTO app_categories (pkg, category, source, enriched)
+       VALUES (?, 'neutral', 'discovered', 0)`,
+      [r.pkg],
+    );
+  }
   const cats = await db.getAllAsync<{ pkg: string; category: AppCategory }>(
     `SELECT pkg, category FROM app_categories WHERE pkg IN (${placeholders})`,
     rows.map((r) => r.pkg),

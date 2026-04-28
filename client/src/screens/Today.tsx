@@ -400,11 +400,14 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             cta="Run nightly now"
             onPress={async () => {
               await run('nightly', async () => {
-                const r = await runNightlyRebuild();
-                if (r.error) toast.error('nightly: ' + r.error);
-                else if (r.skipped) toast.ok(`nightly skipped (${r.skipped})`);
-                else if (r.ok)
-                  toast.ok(`nightly ok · ${r.basedOnDays}d · $${r.costUsd.toFixed(4)}`);
+                const result = await runNightlyRebuild();
+                const firstError = result.memory.error ?? result.profile.error;
+                const firstSkip = result.memory.skipped ?? result.profile.skipped;
+                const totalCost = result.memory.costUsd + result.profile.costUsd;
+                if (firstError) toast.error('nightly: ' + firstError);
+                else if (firstSkip) toast.ok(`nightly skipped (${firstSkip})`);
+                else if (result.ok)
+                  toast.ok(`nightly ok · mem+prof · $${totalCost.toFixed(4)}`);
               });
               await refresh();
             }}

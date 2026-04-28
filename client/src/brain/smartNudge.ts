@@ -16,19 +16,14 @@
  */
 import type * as SQLite from 'expo-sqlite';
 import { withDb } from '../db';
-import { getOpenAiKey, loadSnapshot } from '../secure/keys';
 import { fireNudgeNotification, type NudgeLevel } from '../rules/notify';
 import { deviceTz, localDateStr, localDayStartMs } from '../aggregator/time';
+import { runChatTask } from '../llm/router';
+// Re-exported so existing callers (memory/embed legacy paths, observability
+// summaries) keep working without churn.
+export { sumTodayLlmCostUsd } from '../llm/ledger';
 
-// gpt-4o-mini pricing as of April 2026 (USD per 1M tokens).
-// Override in one place if pricing shifts.
-const PRICE_INPUT_PER_M = 0.15;
-const PRICE_OUTPUT_PER_M = 0.6;
-
-const MODEL = 'gpt-4o-mini';
 const SMART_COOLDOWN_MIN = 90; // don't fire two smart nudges in <90 min
-
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
 export interface SmartNudgeReport {
   ranAt: number;
@@ -87,18 +82,6 @@ export async function runSmartNudgeTick(): Promise<SmartNudgeReport> {
   };
 
   try {
-    const snapshot = await loadSnapshot();
-    const todayCost = await sumTodayLlmCostUsd();
-    if (todayCost >= snapshot.dailyCapUsd) {
-      result.skipped = 'cost_cap';
-      console.log(`[smart-nudge] skip: cost_cap ($${todayCost.toFixed(4)} ≥ $${snapshot.dailyCapUsd})`);
-      return finish(result, startedAt);
-    }
-    const apiKey = await getOpenAiKey();
-    if (!apiKey) {
-      result.skipped = 'no_key';
-      return finish(result, startedAt);
-    }
     if (await isInSmartCooldown(startedAt)) {
       result.skipped = 'cooldown';
       return finish(result, startedAt);
@@ -107,52 +90,30 @@ export async function runSmartNudgeTick(): Promise<SmartNudgeReport> {
     const context = await buildSmartContext(tz, startedAt);
     const userPrompt = JSON.stringify(context, null, 2);
 
-    const httpResponse = await fetch(OPENAI_URL, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
+    const callRes = await runChatTask('smart_nudge', {
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userPrompt }],
+      jsonMode: true,
+      temperature: 0.2,
+      maxOutputTokens: 512,
     });
-    const responseText = await httpResponse.text();
-    if (!httpResponse.ok) {
-      result.error = `http ${httpResponse.status}: ${responseText.slice(0, 200)}`;
-      await logLlmCall({
-        ts: startedAt,
-        ok: false,
-        inTokens: null,
-        outTokens: null,
-        costUsd: 0,
-        request: userPrompt,
-        response: responseText,
-        error: result.error,
-      });
+
+    if (callRes.kind === 'skipped') {
+      result.skipped = callRes.reason === 'cap_exceeded' ? 'cost_cap' : 'no_key';
+      console.log(`[smart-nudge] skip: ${callRes.reason}`);
+      return finish(result, startedAt);
+    }
+    if (callRes.kind === 'failed') {
+      result.error = callRes.reason;
+      console.warn('[smart-nudge] failed:', callRes.reason);
       return finish(result, startedAt);
     }
 
-    const parsed = parseOpenAiResponse(responseText);
-    result.costUsd = computeCostUsd(parsed.inTokens, parsed.outTokens);
-    const llmCallId = await logLlmCall({
-      ts: startedAt,
-      ok: true,
-      inTokens: parsed.inTokens,
-      outTokens: parsed.outTokens,
-      costUsd: result.costUsd,
-      request: userPrompt,
-      response: parsed.rawContent,
-      error: null,
-    });
+    const response = callRes.response;
+    result.costUsd = response.usage.costUsd;
+    const decision = parseDecision(response.text);
+    const llmCallId = await lastLlmCallId();
 
-    const decision = parsed.decision;
     if (!decision || !decision.should_nudge) {
       console.log(`[smart-nudge] no nudge · cost=$${result.costUsd.toFixed(5)}`);
       return finish(result, startedAt);
@@ -190,64 +151,22 @@ export async function runSmartNudgeTick(): Promise<SmartNudgeReport> {
   return finish(result, startedAt);
 }
 
+/**
+ * Read back the row id of the last `llm_calls` row written. The router
+ * inserts immediately after the call, so this is safe in the same tick.
+ */
+async function lastLlmCallId(): Promise<number | null> {
+  return withDb(async (db) => {
+    const r = await db.getFirstAsync<{ id: number } | null>(
+      `SELECT id FROM llm_calls ORDER BY id DESC LIMIT 1`,
+    );
+    return r?.id ?? null;
+  });
+}
+
 function finish(r: SmartNudgeReport, startedAt: number): SmartNudgeReport {
   r.durationMs = Date.now() - startedAt;
   return r;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Cost cap + ledger
-// ────────────────────────────────────────────────────────────────────────────
-
-export async function sumTodayLlmCostUsd(): Promise<number> {
-  return withDb(async (db) => {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const r = await db.getFirstAsync<{ total: number | null }>(
-      `SELECT SUM(cost_usd) AS total FROM llm_calls WHERE ts >= ?`,
-      [startOfDay.getTime()],
-    );
-    return r?.total ?? 0;
-  });
-}
-
-interface LlmCallRowInsert {
-  ts: number;
-  ok: boolean;
-  inTokens: number | null;
-  outTokens: number | null;
-  costUsd: number;
-  request: string;
-  response: string;
-  error: string | null;
-}
-
-async function logLlmCall(row: LlmCallRowInsert): Promise<number> {
-  return withDb(async (db) => {
-    const r = await db.runAsync(
-      `INSERT INTO llm_calls
-        (ts, purpose, model, in_tokens, out_tokens, cost_usd, ok, error, request, response)
-       VALUES (?, 'tick', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        row.ts,
-        MODEL,
-        row.inTokens,
-        row.outTokens,
-        row.costUsd,
-        row.ok ? 1 : 0,
-        row.error,
-        row.request,
-        row.response,
-      ],
-    );
-    return r.lastInsertRowId;
-  });
-}
-
-function computeCostUsd(inTok: number | null, outTok: number | null): number {
-  const inCost = ((inTok ?? 0) * PRICE_INPUT_PER_M) / 1_000_000;
-  const outCost = ((outTok ?? 0) * PRICE_OUTPUT_PER_M) / 1_000_000;
-  return inCost + outCost;
 }
 
 async function isInSmartCooldown(now: number): Promise<boolean> {
@@ -363,57 +282,31 @@ async function loadCurrentPlace(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// OpenAI response parsing
+// Decision parsing (model returns strict JSON via response_format=json_object)
 // ────────────────────────────────────────────────────────────────────────────
 
-interface ParsedOpenAi {
-  decision: ModelDecision | null;
-  inTokens: number | null;
-  outTokens: number | null;
-  rawContent: string;
-}
-
-function parseOpenAiResponse(responseText: string): ParsedOpenAi {
-  let body: unknown;
+function parseDecision(content: string): ModelDecision | null {
+  if (!content) return null;
   try {
-    body = JSON.parse(responseText);
-  } catch {
-    return { decision: null, inTokens: null, outTokens: null, rawContent: responseText };
-  }
-  if (typeof body !== 'object' || body === null) {
-    return { decision: null, inTokens: null, outTokens: null, rawContent: responseText };
-  }
-  const obj = body as Record<string, unknown>;
-  const usage = (obj.usage ?? {}) as Record<string, unknown>;
-  const inTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : null;
-  const outTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
-  const choices = Array.isArray(obj.choices) ? obj.choices : [];
-  const first = (choices[0] ?? {}) as Record<string, unknown>;
-  const message = (first.message ?? {}) as Record<string, unknown>;
-  const content = typeof message.content === 'string' ? message.content : '';
-  let decision: ModelDecision | null = null;
-  if (content) {
-    try {
-      const parsed = JSON.parse(content) as Partial<ModelDecision>;
-      if (
-        typeof parsed.should_nudge === 'boolean' &&
-        typeof parsed.title === 'string' &&
-        typeof parsed.body === 'string' &&
-        typeof parsed.reasoning === 'string'
-      ) {
-        decision = {
-          should_nudge: parsed.should_nudge,
-          level: clampLevel(parsed.level),
-          title: parsed.title.slice(0, 80),
-          body: parsed.body.slice(0, 200),
-          reasoning: parsed.reasoning.slice(0, 240),
-        };
-      }
-    } catch {
-      // model returned non-JSON; treat as "no nudge"
+    const parsed = JSON.parse(content) as Partial<ModelDecision>;
+    if (
+      typeof parsed.should_nudge === 'boolean' &&
+      typeof parsed.title === 'string' &&
+      typeof parsed.body === 'string' &&
+      typeof parsed.reasoning === 'string'
+    ) {
+      return {
+        should_nudge: parsed.should_nudge,
+        level: clampLevel(parsed.level),
+        title: parsed.title.slice(0, 80),
+        body: parsed.body.slice(0, 200),
+        reasoning: parsed.reasoning.slice(0, 240),
+      };
     }
+  } catch {
+    // model returned non-JSON; treat as "no nudge"
   }
-  return { decision, inTokens, outTokens, rawContent: content || responseText };
+  return null;
 }
 
 function clampLevel(v: unknown): NudgeLevel {
