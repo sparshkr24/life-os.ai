@@ -1,20 +1,23 @@
 # CLAUDE.md — `client/src/memory/`
 
-> **v3 Stage 13 module.** Memory store + extraction + RAG. Read [docs/ARCHITECTURE.md §9](../../../docs/ARCHITECTURE.md) and [docs/LIFEOS_ARCHITECTURE_EVOLUTION.md](../../../docs/LIFEOS_ARCHITECTURE_EVOLUTION.md) before editing.
+> **v3 Stage 13–16 module.** Memory store + RAG + self-learning maintenance. Read [docs/ARCHITECTURE.md §9](../../../docs/ARCHITECTURE.md) and [docs/LIFEOS_ARCHITECTURE_EVOLUTION.md](../../../docs/LIFEOS_ARCHITECTURE_EVOLUTION.md) before editing.
 
 ## Files
 
 | File | Role |
 |---|---|
 | `embed.ts` | OpenAI `text-embedding-3-small` wrapper. Cost-cap-gated, key-checked, every call logged to `llm_calls` (purpose='embed'). Exports `embedText`, `cosineSim`, `EMBED_DIM=1536`, `EMBED_MODEL`. Returns `null` on failure — callers must skip the write, never persist a row without an embedding. |
-| `store.ts` | CRUD + scoring. `createMemory(MemoryInput)` embeds + inserts (or returns null). `listActiveMemories`, `getMemoryById`, `touchMemories`, `reinforceMemory`, `contradictMemory`, `archiveMemory`, `recordPredictionOutcome`, `getMemoryStats`. `computeEffectiveScore(Memory)` is the deterministic decay formula consumed by re-rankers and Stage-16 consolidation. Hydration parses JSON `embedding`/`tags`/`child_ids`; rows with bad shape are skipped (logged). |
+| `store.ts` | CRUD + scoring. `createMemory(MemoryInput)` embeds + inserts (or returns null). `listActiveMemories`, `getMemoryById`, `touchMemories`, `reinforceMemory` (Stage 15: also `confidence = MIN(0.99, confidence + 0.05)`), `contradictMemory` (Stage 15: also `confidence = MAX(0.05, confidence - 0.10)`), `archiveMemory`, `recordPredictionOutcome`, `getMemoryStats`. `computeEffectiveScore(Memory)` is the deterministic decay formula consumed by re-rankers. Hydration parses JSON `embedding`/`tags`/`child_ids`; rows with bad shape are skipped (logged). |
 | `rag.ts` | `retrieveContext(RagQuery) → RagResult`. Embeds the query text, scans `listActiveMemories()`, computes cosine, re-ranks by `0.5·sim + 0.2·recency + 0.15·|impact| + 0.15·confidence` (+ small tag-overlap bonus), bumps `last_accessed` on the top-k via `touchMemories`. Returns `{ embedded: false, memories: [] }` on embed failure so callers can fall back. |
-| `extract.ts` | **Stage 13.** `runDailyMemoryExtraction(forDate)`: cost-cap + OpenAI key check, gated by `schema_meta.last_extract_date`. Loads `daily_rollup` for `forDate` + 7-day baseline scores, calls gpt-4o-mini with `response_format: json_object` and a strict schema (type/summary/cause/effect/impact_score/confidence/tags/predicted_outcome), validates each candidate (clamps + drops weak/malformed), then `createMemory` per candidate. Logs to `llm_calls` (purpose='extract'). Called from `brain/nightly.ts` for yesterday before the consolidation prompt is built. |
+| `maintenance.ts` | **Stage 15/16.** `runMemoryMaintenance()` — deterministic SQL safety net called from `brain/nightly.ts:runMemoryPass` AFTER the LLM tool loop succeeds. Idempotent (every UPDATE includes `archived_ts IS NULL`). Soft-archives in 4 buckets: (1) failed predictions never reinforced (`was_correct=0 AND reinforcement=0`), (2) consistently disproven (`contradiction≥3 AND contradiction≥2·reinforcement`), (3) bottom-of-barrel confidence (`<0.10 AND reinforcement=0`), (4) consolidation children whose parent has been alive ≥14d. Returns `MaintenanceReport` with per-bucket counts; logged but not persisted. |
 
-## Callers (Stage 13 wiring)
+## Callers
 
-- `brain/nightly.ts` → calls `runDailyMemoryExtraction(yesterday)` (self-gated), then `retrieveContext({decisionType:'nightly_consolidation', queryText, k:12})` and appends `result.contextBlock` to the user prompt. Empty result → prompt unchanged (v2 path).
-- `brain/chat.ts` → calls `retrieveContext({decisionType:'chat', queryText: lastUserMessage, k:6})` and appends `contextBlock` to `SYSTEM_PROMPT`. Embed failure / empty store → bare `SYSTEM_PROMPT`.
+- `brain/nightly.ts:runMemoryPass` → loads raw events for yesterday + `priorProfile` + `unverifiedPredictions` + `shakyMemories` (contradiction≥1 OR confidence<0.4 with no reinforcement), prompts the LLM to call `create_memory`/`verify_memory`/`reinforce_memory`/`contradict_memory`/`consolidate_memories`/`mark_memory_archived`/`set_app_category` as needed, then calls `runMemoryMaintenance()` after the tool loop succeeds.
+- `brain/nightly.ts:runProfilePass` → reads top-25 active memories by `|impact|·confidence` to ground the profile rebuild. Read-only.
+- `brain/nightly.ts:runNudgePass` → reads top-30 actionable memories (causal/habit/prediction with `|impact|≥0.15` AND `confidence≥0.5`) to seed `create_rule` calls; passes their ids in `based_on_memory_ids`.
+- `brain/chat.ts` → `retrieveContext({decisionType:'chat', queryText: lastUserMessage, k:6})` and appends `contextBlock` to the chat system prompt. Embed failure / empty store → bare prompt.
+- `brain/predictiveInsights.ts` → `retrieveContext({decisionType:'prediction_update', queryText: today_summary, k:5})` for the Today rollup tile.
 
 ## Hard rules (in addition to the root list)
 
@@ -28,10 +31,10 @@
 ## Stage progression
 
 - **Stage 12:** scaffolding (embed/store/rag).
-- **Stage 13 (now):** `extract.ts` shipped. RAG wired into `brain/nightly.ts` + `brain/chat.ts`. Falls back to v2 path on RAG miss.
-- **Stage 14:** add weekly rule-generator that consumes top-confidence memories, writes to `rules` with `source='llm'`. Disable smart-nudge tick.
-- **Stage 15:** in `brain/nightly.ts`, after rebuilding rollups, call `recordPredictionOutcome` on yesterday's `type='prediction'` memories.
-- **Stage 16:** add `consolidate.ts` — weekly merge pass. Sets `parent_id`/`child_ids`, archives subsumed memories.
+- **Stage 13:** RAG wired into `brain/nightly.ts` + `brain/chat.ts`. Falls back to v2 path on RAG miss.
+- **Stage 14:** Multi-provider LLM router; LLM-curated rules (`source='llm'`) generated by nightly Pass 3, replacing the smart-nudge tick.
+- **Stage 15 (now):** confidence auto-updates on reinforce/contradict; `maintenance.ts` adds the deterministic post-pass sweep that closes the feedback loop.
+- **Stage 16 (now):** `consolidate_memories` (LLM tool, scope `nightly_memory`) creates abstract `pattern`-typed parents; `maintenance.ts` archives consolidation children once parent has been alive ≥14d.
 - **Stage 17:** add 5-min RAG cache, batch embedding while charging, empty-store fallback in callers.
 
 ## Folder layout invariants

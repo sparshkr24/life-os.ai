@@ -701,7 +701,11 @@ add({
   def: {
     name: 'verify_memory',
     description:
-      'Record the actual outcome of a memory that previously had a predicted_outcome. Updates was_correct + bumps confidence/contradiction.',
+      'Record the actual outcome of a memory that previously had a predicted_outcome. ' +
+      'Sets actual_outcome + was_correct, then internally calls reinforce_memory or ' +
+      'contradict_memory (so confidence shifts ±0.05/−0.10 automatically). The post-pass ' +
+      'sweep auto-archives predictions verified false that have never been reinforced — ' +
+      "don't bother manually archiving a one-off wrong call.",
     parameters: {
       type: 'object',
       properties: {
@@ -728,7 +732,9 @@ add({
 add({
   def: {
     name: 'reinforce_memory',
-    description: 'Bump reinforcement count + confidence on a memory observed again.',
+    description:
+      'Bump reinforcement count + nudge confidence up (+0.05, capped at 0.99) on a memory ' +
+      'observed again today.',
     parameters: {
       type: 'object',
       properties: { id: { type: 'string' } },
@@ -747,7 +753,10 @@ add({
 add({
   def: {
     name: 'contradict_memory',
-    description: 'Bump contradiction count + drop confidence on a memory disproven by today.',
+    description:
+      'Bump contradiction count + drop confidence (−0.10, floor 0.05) on a memory disproven ' +
+      "by today's evidence. The post-pass sweep auto-archives memories with ≥3 contradictions " +
+      'AND ratio ≥2:1 vs reinforcement — you do not need to manually archive routine misses.',
     parameters: {
       type: 'object',
       properties: { id: { type: 'string' } },

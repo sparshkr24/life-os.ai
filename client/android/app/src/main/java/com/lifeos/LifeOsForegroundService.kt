@@ -298,9 +298,11 @@ class LifeOsForegroundService : Service() {
       if (newTs - curEnd > DEDUP_GAP_MS) return false
       // Don't go backwards.
       if (newTs <= curEnd) return true // already covered, no-op success
+      // Re-stamp ambient `_ctx` so the row reflects current phone state.
+      // Without this, every dedup-extended app_fg row loses _ctx entirely.
       db.execSQL(
         "UPDATE events SET payload = ? WHERE id = ?",
-        arrayOf<Any>(buildPayload(pkg, startTs, newTs), id)
+        arrayOf<Any>(PhoneState.stamp(buildPayload(pkg, startTs, newTs)), id)
       )
       return true
     }
@@ -328,7 +330,7 @@ class LifeOsForegroundService : Service() {
       if (endTs <= startTs) return false
       db.execSQL(
         "UPDATE events SET payload = ? WHERE id = ?",
-        arrayOf<Any>(buildPayload(pkg, startTs, endTs), id)
+        arrayOf<Any>(PhoneState.stamp(buildPayload(pkg, startTs, endTs)), id)
       )
       return true
     }

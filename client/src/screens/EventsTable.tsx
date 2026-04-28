@@ -20,6 +20,7 @@ import {
   makeStyles,
   parseEvent,
   prettyPkg,
+  safeJson,
   useAsyncRunner,
 } from './shared';
 import { AppIcon } from './widgets';
@@ -126,10 +127,25 @@ export function EventsTable() {
     const p = parseEvent(r);
     const tint = theme.kindColors[r.kind] ?? theme.accent;
     const appLabel = p.pkg ? prettyPkg(p.pkg) : r.kind;
+    // Notifs have no meaningful duration unless they were "ongoing" (music,
+    // navigation, calls). For everything else show the notif category in
+    // the sub-line and skip the duration column entirely.
+    const rawPayload = safeJson(r.payload) as Record<string, unknown> | null;
+    const isNotif = r.kind === 'notif';
+    const notifCategory =
+      isNotif && rawPayload && typeof rawPayload.category === 'string' ? rawPayload.category : '';
+    const notifOngoing = isNotif && rawPayload?.ongoing === true;
     const sub =
       r.kind === 'app_fg' || r.kind === 'app_bg'
         ? `${fmtClock(p.startTs)} → ${fmtClock(p.endTs)}`
-        : r.kind.replace(/_/g, ' ');
+        : isNotif
+          ? notifCategory
+            ? `notif · ${notifCategory}${notifOngoing ? ' · ongoing' : ''}`
+            : `notif${notifOngoing ? ' · ongoing' : ''}`
+          : r.kind.replace(/_/g, ' ');
+    // Hide duration for transient notifs (always 0); show it only for
+    // ongoing notifs that were actually closed (have real duration_ms).
+    const showDuration = !isNotif || (notifOngoing && p.durationMs > 0);
     return (
       <Pressable onPress={() => setExpanded(isOpen ? null : r.id)} style={s.eventRow}>
         <View style={[s.eventTint, { backgroundColor: tint }]} />
@@ -145,9 +161,11 @@ export function EventsTable() {
               </Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
-              <Text style={[s.tdMono, { color: theme.text, fontWeight: '700' }]}>
-                {fmtDur(p.durationMs)}
-              </Text>
+              {showDuration && (
+                <Text style={[s.tdMono, { color: theme.text, fontWeight: '700' }]}>
+                  {fmtDur(p.durationMs)}
+                </Text>
+              )}
               <Text style={[s.tdMonoSm, { color: theme.textFaint }]}>
                 {fmtTimeShort(r.ts)}
               </Text>

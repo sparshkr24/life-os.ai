@@ -173,6 +173,7 @@ export async function reinforceMemory(id: string): Promise<void> {
       `UPDATE memories
          SET reinforcement = reinforcement + 1,
              occurrences   = occurrences + 1,
+             confidence    = MIN(0.99, confidence + 0.05),
              updated_ts    = ?,
              last_accessed = ?
        WHERE id = ?`,
@@ -181,13 +182,14 @@ export async function reinforceMemory(id: string): Promise<void> {
   });
 }
 
-/** Contradict a memory: outcome did not match. Confidence will trend down via computeEffectiveScore. */
+/** Contradict a memory: outcome did not match. Confidence drops; computeEffectiveScore drops further via penalty. */
 export async function contradictMemory(id: string): Promise<void> {
   const now = Date.now();
   await withDb(async (db) => {
     await db.runAsync(
       `UPDATE memories
          SET contradiction = contradiction + 1,
+             confidence    = MAX(0.05, confidence - 0.10),
              updated_ts    = ?,
              last_accessed = ?
        WHERE id = ?`,

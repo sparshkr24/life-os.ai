@@ -41,6 +41,7 @@ import { DEFAULT_TASK_MODELS } from '../llm/models';
 import { getToolsForScope, type ToolScope } from './tools';
 import type { ChatMessage, ToolDefinition } from '../llm/types';
 import { loadRawEventsForDate, MAX_EVENTS_FOR_MEMORY } from './rawEvents';
+import { runMemoryMaintenance } from '../memory/maintenance';
 
 const MEMORY_TOOL_LOOPS = 8;
 const PROFILE_TOOL_LOOPS = 4;
@@ -117,6 +118,14 @@ HARD RULES:
     fields when relevant — exact times, place_ids, app names.
   - Skip noise. Don't create memories for routine app opens unless they
     cluster into a pattern.
+
+CONFIDENCE & ARCHIVAL ARE AUTOMATIC. After your tool loop ends a deterministic SQL sweep runs that:
+  • bumps confidence +0.05 on every reinforce_memory and -0.10 on every contradict_memory
+  • soft-archives memories with was_correct=0 AND reinforcement=0 (failed predictions never re-confirmed)
+  • soft-archives memories with contradiction ≥ 3 AND contradiction ≥ 2× reinforcement (consistently disproven)
+  • soft-archives memories with confidence < 0.10 AND reinforcement = 0
+  • soft-archives consolidation children whose parent has been alive ≥14d
+You only need to call mark_memory_archived for clearly superseded memories that don't fit those rules. Don't bookkeep — just send the right signal.
 
 Reply with a brief plain-text summary of what you did (counts of created /
 verified / reinforced / contradicted / archived / consolidated / enriched).
@@ -243,6 +252,22 @@ async function runMemoryPass(yesterday: string): Promise<PassReport> {
     if (finalText !== null) {
       report.ok = true;
       console.log(`[nightly:memory] ${finalText.slice(0, 240)}`);
+      // Stage 15/16: deterministic sweep that closes the feedback loop after
+      // the LLM has done its interpretive work. Pure SQL — never throws cost.
+      try {
+        const sweep = await runMemoryMaintenance();
+        console.log(
+          `[nightly:memory] maintenance sweep: failed=${sweep.archivedFailedPredictions} ` +
+            `contradicted=${sweep.archivedContradicted} ` +
+            `lowConfidence=${sweep.archivedLowConfidence} ` +
+            `supersededChildren=${sweep.archivedSupersededChildren}`,
+        );
+      } catch (e) {
+        console.error(
+          '[nightly:memory] maintenance sweep failed:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
     }
   } catch (e) {
     report.error = e instanceof Error ? e.message : String(e);
@@ -259,6 +284,15 @@ interface MemoryPassInputs {
     summary: string;
     predicted_outcome: string;
     rollup_date: string | null;
+  }>;
+  shakyMemories: Array<{
+    id: string;
+    type: string;
+    summary: string;
+    confidence: number;
+    reinforcement: number;
+    contradiction: number;
+    was_correct: number | null;
   }>;
   unenrichedAppCount: number;
 }
@@ -298,10 +332,33 @@ async function loadMemoryPassInputs(yesterday: string): Promise<MemoryPassInputs
       `SELECT COUNT(*) as count FROM app_categories WHERE enriched = 0`,
     );
 
+    // Memories whose evidence is shaky: at least one contradiction, OR a low
+    // confidence with no reinforcement. The LLM may decide to revise (cause/
+    // effect was wrong → archive + create new), reinforce (today's events
+    // actually confirm it), or leave alone (one-off miss). The post-pass
+    // deterministic sweep will catch the rest.
+    const shakyMemories = await db.getAllAsync<{
+      id: string;
+      type: string;
+      summary: string;
+      confidence: number;
+      reinforcement: number;
+      contradiction: number;
+      was_correct: number | null;
+    }>(
+      `SELECT id, type, summary, confidence, reinforcement, contradiction, was_correct
+       FROM memories
+       WHERE archived_ts IS NULL
+         AND (contradiction >= 1 OR (confidence < 0.4 AND reinforcement = 0))
+       ORDER BY contradiction DESC, confidence ASC
+       LIMIT 20`,
+    );
+
     return {
       priorProfile,
       yesterdayRollup,
       unverifiedPredictions: predictionRows,
+      shakyMemories,
       unenrichedAppCount: unenrichedRow?.count ?? 0,
     };
   });
@@ -335,6 +392,14 @@ function buildMemoryUserPrompt(
   lines.push('');
   lines.push(`## Unverified predictions you should call verify_memory on:`);
   lines.push(JSON.stringify(inputs.unverifiedPredictions, null, 2));
+  lines.push('');
+  lines.push(
+    `## Shaky memories (contradictions or low confidence) — review against today's evidence:`,
+  );
+  lines.push(
+    `For each, decide: reinforce_memory (today confirms it), contradict_memory (today refutes it again), or leave alone. The post-pass sweep auto-archives anything with ≥3 contradictions and ratio ≥2:1 vs reinforcement.`,
+  );
+  lines.push(JSON.stringify(inputs.shakyMemories, null, 2));
   lines.push('');
   lines.push(`## Yesterday's full event timeline (one event per line, chronological):`);
   lines.push('```');
