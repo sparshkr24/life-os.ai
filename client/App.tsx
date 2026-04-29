@@ -19,7 +19,7 @@ import {
 } from '@expo-google-fonts/jetbrains-mono';
 import { migrate } from './src/db';
 import { LifeOsBridge } from './src/bridge/lifeOsBridge';
-import { registerAggregatorTask } from './src/aggregator/worker';
+import { registerAggregatorTask, startAggregatorForegroundLoop } from './src/aggregator/worker';
 import { startRulesForegroundLoop } from './src/rules/worker';
 import { handleProactiveNotificationResponse } from './src/brain/proactiveResponse';
 import * as Notifications from 'expo-notifications';
@@ -114,23 +114,30 @@ function Shell() {
   const [tab, setTab] = useState<TabId>('today');
   const [bootErr, setBootErr] = useState<string | null>(null);
   const [usageGranted, setUsageGranted] = useState<boolean | null>(null);
-  const [keyboardUp, setKeyboardUp] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const native = Platform.OS === 'android' && !!LifeOsBridge;
 
-  // Hide the FloatingNav whenever the soft keyboard is visible — it would
-  // otherwise either overlap the keyboard (Android edge-to-edge) or sit on
-  // top of bottom-anchored TextInputs.
+  // Global keyboard avoidance.
+  // We have `edgeToEdgeEnabled: true` in app.json which makes the activity
+  // draw under the system bars — that breaks Android's `adjustResize`, so
+  // we manually shrink the shell by the keyboard height. Every screen below
+  // automatically gets the shrunken viewport (no per-screen KAV needed).
+  // We also stash the height so the FloatingNav (absolute, bottom-anchored)
+  // can be hidden while the keyboard is up.
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const a = Keyboard.addListener(showEvt, () => setKeyboardUp(true));
-    const b = Keyboard.addListener(hideEvt, () => setKeyboardUp(false));
+    const a = Keyboard.addListener(showEvt, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const b = Keyboard.addListener(hideEvt, () => setKeyboardHeight(0));
     return () => {
       a.remove();
       b.remove();
     };
   }, []);
+  const keyboardUp = keyboardHeight > 0;
 
   useEffect(() => {
     (async () => {
@@ -140,6 +147,11 @@ function Shell() {
           console.error('[boot] registerAggregatorTask failed:', e);
         });
         startRulesForegroundLoop();
+        // expo-background-fetch on Android is unreliable (WorkManager defers
+        // far past the 15-min floor under Doze). Drive aggregator from JS
+        // while the app is open so rollups stay fresh; the BG task is a
+        // best-effort fallback for when JS is killed.
+        startAggregatorForegroundLoop();
         if (native) {
           setUsageGranted(await LifeOsBridge.hasUsageAccess());
           await LifeOsBridge.startService().catch((e: unknown) => {
@@ -177,7 +189,7 @@ function Shell() {
   }
 
   return (
-    <View style={[styles.shell, { backgroundColor: theme.bg }]}>
+    <View style={[styles.shell, { backgroundColor: theme.bg, paddingBottom: keyboardHeight }]}>
       {/* Layered header band (fake gradient via two stacked layers). */}
       <View style={[styles.headerWrap, { backgroundColor: theme.headerGradBottom }]}>
         <View style={[styles.headerOverlay, { backgroundColor: theme.headerGradTop, opacity: 0.55 }]} />

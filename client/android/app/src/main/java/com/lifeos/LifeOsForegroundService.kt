@@ -31,6 +31,10 @@ class LifeOsForegroundService : Service() {
   private val handler = Handler(Looper.getMainLooper())
   private var lastPollMs: Long = 0L
   private var lastHcPollMs: Long = 0L
+  // Last time we *kicked* the headless aggregator from this service. We
+  // also read schema_meta.last_aggregator_ts to coordinate with the JS
+  // foreground driver — whichever ran more recently wins.
+  private var lastAggregatorKickMs: Long = 0L
 
   private val pollTask = object : Runnable {
     override fun run() {
@@ -59,6 +63,15 @@ class LifeOsForegroundService : Service() {
         StepCounterCollector.flushIfDue()
       } catch (e: Exception) {
         Log.e(TAG, "step flush failed", e)
+      }
+      // Stage v7+: drive the aggregator (rollups + insights + proactive +
+      // rule eval + nightly watchdog) from here so it keeps running when
+      // the app is killed. Reads the JS-written `last_aggregator_ts` so we
+      // don't double-fire when the app UI is also open.
+      try {
+        maybeKickAggregator()
+      } catch (e: Exception) {
+        Log.e(TAG, "aggregator kick failed", e)
       }
       handler.postDelayed(this, POLL_INTERVAL_MS)
     }
@@ -393,8 +406,54 @@ class LifeOsForegroundService : Service() {
     return false
   }
 
-  private fun openLifeOsDb(): SQLiteDatabase? {
-    val f = File(filesDir, "SQLite/lifeos.db")
+  /**
+   * Starts the headless JS aggregator if ≥15 min have elapsed since the
+   * last successful tick. Coordination with the JS-side foreground driver
+   * is via `schema_meta.last_aggregator_ts` (written by `runAggregatorTick`).
+   *
+   * On a fresh service start `lastAggregatorKickMs == 0` and the DB row
+   * may also be stale, so the first tick fires within ~60 s of service
+   * boot — desirable, it backfills any work missed while we were dead.
+   */
+  private fun maybeKickAggregator() {
+    val now = System.currentTimeMillis()
+    val lastJsTickMs = readLastAggregatorTsFromDb()
+    val lastEffectiveMs = maxOf(lastAggregatorKickMs, lastJsTickMs)
+    val elapsed = now - lastEffectiveMs
+    if (lastEffectiveMs != 0L && elapsed < AGGREGATOR_INTERVAL_MS) return
+
+    Log.i(TAG, "kicking headless aggregator (elapsed=${elapsed}ms)")
+    lastAggregatorKickMs = now
+    try {
+      // Plain startService is fine: HeadlessJsTaskService acquires its own
+      // wakelock, and our caller (this FG service) is already foreground so
+      // Android allows the start. We do NOT use startForegroundService —
+      // HeadlessJsTaskService doesn't call startForeground() and would
+      // crash with ForegroundServiceDidNotStartInTimeException.
+      startService(Intent(this, AggregatorHeadlessTaskService::class.java))
+    } catch (e: Exception) {
+      Log.e(TAG, "startService(headless) failed: ${e.message}")
+    }
+  }
+
+  private fun readLastAggregatorTsFromDb(): Long {
+    val db = openLifeOsDb() ?: return 0L
+    return try {
+      db.rawQuery(
+        "SELECT value FROM schema_meta WHERE key = ?",
+        arrayOf("last_aggregator_ts"),
+      ).use { c ->
+        if (c.moveToFirst()) c.getString(0)?.toLongOrNull() ?: 0L else 0L
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "read last_aggregator_ts failed: ${e.message}")
+      0L
+    } finally {
+      try { db.close() } catch (_: Exception) {}
+    }
+  }
+
+  private fun openLifeOsDb(): SQLiteDatabase? {    val f = File(filesDir, "SQLite/lifeos.db")
     if (!f.exists()) {
       Log.w(TAG, "lifeos.db missing at ${f.absolutePath} — open the app once so JS migrates")
       return null
@@ -430,6 +489,10 @@ class LifeOsForegroundService : Service() {
     private const val STARTUP_LOOKBACK_MS = 5 * 60_000L
     // Health Connect data updates slowly; polling every 5 minutes is plenty.
     private const val HC_POLL_INTERVAL_MS = 5 * 60_000L
+    // Stage v7+: how often to kick the JS aggregator. Matches the v2
+    // architecture's 15-min cadence. Coordinated with the JS foreground
+    // driver via `schema_meta.last_aggregator_ts`.
+    private const val AGGREGATOR_INTERVAL_MS = 15 * 60_000L
     // If a new RESUMED for the same pkg arrives within this window of the
     // previous session's last-known end_ts, treat it as a continuation and
     // extend the existing row instead of inserting a new one. 90 s comfortably

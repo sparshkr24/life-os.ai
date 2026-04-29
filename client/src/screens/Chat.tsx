@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Keyboard,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -37,8 +36,9 @@ export function ChatScreen() {
     todayLlmSpendUsd().then(setSpend).catch(() => {});
   }, [messages.length]);
 
-  // Keyboard tracking — when up the FloatingNav is hidden by App.tsx, so we
-  // can drop the 110 px reservation we keep when the nav is visible.
+  // The Shell already shrinks the viewport above the keyboard. We only need
+  // to know whether the keyboard is up so the toolbar can drop its FloatingNav
+  // clearance (110 px) and sit flush against the keyboard.
   useEffect(() => {
     const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
@@ -107,10 +107,7 @@ export function ChatScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={0}>
+    <View style={{ flex: 1 }}>
       <ScrollView
         ref={scrollRef}
         style={s.list}
@@ -171,6 +168,6 @@ export function ChatScreen() {
           <Text style={s.btnText}>{sending ? '…' : 'Send'}</Text>
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }

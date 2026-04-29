@@ -56,6 +56,11 @@
       android:name=".LifeOsForegroundService"
       android:exported="false"
       android:foregroundServiceType="dataSync"/>
+    <!-- Drives the aggregator every 15 min from the Kotlin FG service so
+         rollups stay fresh even when JS is killed. -->
+    <service
+      android:name=".AggregatorHeadlessTaskService"
+      android:exported="false"/>
     <!-- Stage 3c: NotificationListenerService -->
     <service
       android:name=".LifeOsNotificationListener"
