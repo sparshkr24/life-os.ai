@@ -26,6 +26,16 @@ const DB_NAME = 'lifeos.db';
 let _db: SQLite.SQLiteDatabase | null = null;
 let _opening: Promise<SQLite.SQLiteDatabase> | null = null;
 
+// Set when withDb catches `database disk image is malformed` mid-session.
+// Today screen polls `isDbCorrupt()` and shows a banner with a Repair button.
+let _corruptDetected = false;
+export function isDbCorrupt(): boolean {
+  return _corruptDetected;
+}
+export function clearDbCorrupt(): void {
+  _corruptDetected = false;
+}
+
 // Migration gate. `migrate()` flips this to a promise that resolves once
 // every CREATE TABLE statement has run. `withDb` awaits it on every call so
 // repos / screens that fire DB queries during the boot useEffect can't race
@@ -38,7 +48,15 @@ async function openOnce(): Promise<SQLite.SQLiteDatabase> {
   // never inherit a half-finalized SharedRef from a previous JS module load.
   const db = await SQLite.openDatabaseAsync(DB_NAME, { useNewConnection: true });
   // PRAGMAs can throw if the DB is locked; retry briefly.
-  await execWithBackoff(db, 'PRAGMA journal_mode = WAL;');
+  // Rollback-journal (the SQLite default) — NOT WAL. We share lifeos.db
+  // with the Kotlin foreground service which uses Android's bundled SQLite
+  // (different patch level). WAL's `-shm` file format is implementation-
+  // specific, so two engines checkpointing the same WAL eventually corrupt
+  // the file. Rollback journal has no shared memory format → safe to share.
+  await execWithBackoff(db, 'PRAGMA journal_mode = DELETE;');
+  // 5 s busy timeout: if Kotlin holds the write lock momentarily, wait
+  // instead of throwing SQLITE_BUSY. Cheap; no effect when lock is free.
+  await execWithBackoff(db, 'PRAGMA busy_timeout = 5000;');
   await execWithBackoff(db, 'PRAGMA foreign_keys = ON;');
   return db;
 }
@@ -154,6 +172,17 @@ async function withDbUnsafe<T>(fn: (db: SQLite.SQLiteDatabase) => Promise<T>): P
   try {
     return await fn(db);
   } catch (e) {
+    if (isDatabaseCorruptError(e)) {
+      // Mid-session corruption (rare with WAL off, but file-system or
+      // process-kill-mid-fsync can still produce this). Set the global flag
+      // so the UI can surface a "Repair database" banner. We DO NOT auto-
+      // wipe — that would silently destroy days of behavior data. The
+      // existing boot-time recovery path still handles "DB unusable on
+      // app start"; this branch is for "DB went bad while running".
+      _corruptDetected = true;
+      console.error('[db] CORRUPT detected mid-session:', (e as Error).message);
+      throw e;
+    }
     const stale = isStaleRefError(e);
     const ioErr = isTransientIoError(e);
     if (!stale && !ioErr) throw e;

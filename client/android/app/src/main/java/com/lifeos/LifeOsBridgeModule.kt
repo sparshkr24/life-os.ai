@@ -46,6 +46,19 @@ class LifeOsBridgeModule(private val ctx: ReactApplicationContext) :
   }
 
   @ReactMethod
+  fun stopService(promise: Promise) {
+    Log.i(TAG, "stopService called")
+    try {
+      val intent = Intent(ctx, LifeOsForegroundService::class.java)
+      ctx.stopService(intent)
+      promise.resolve(null)
+    } catch (e: Exception) {
+      Log.e(TAG, "stopService failed", e)
+      promise.reject("stop_failed", e.message ?: "unknown", e)
+    }
+  }
+
+  @ReactMethod
   fun hasUsageAccess(promise: Promise) {
     try {
       val appOps = ctx.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager

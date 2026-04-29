@@ -374,13 +374,15 @@ class LifeOsForegroundService : Service() {
     }
     return try {
       val db = SQLiteDatabase.openDatabase(f.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
-      // JS opens the same file with PRAGMA journal_mode=WAL. Match it here so
-      // the two connections don't conflict and so writes from this service
-      // don't leave the file in a state expo-sqlite refuses to read.
+      // Rollback journal (SQLite default), NOT WAL. JS opens the same file
+      // with `PRAGMA journal_mode=DELETE`. Sharing WAL between two SQLite
+      // builds (expo-sqlite + Android's bundled lib) corrupted the file via
+      // `-shm` format mismatch. Rollback journal has no shared memory format.
+      // Wait up to 5 s if JS holds the lock instead of throwing SQLITE_BUSY.
       try {
-        db.enableWriteAheadLogging()
+        db.rawQuery("PRAGMA busy_timeout = 5000", null).use { it.moveToFirst() }
       } catch (e: Exception) {
-        Log.w(TAG, "enableWAL failed (non-fatal): ${e.message}")
+        Log.w(TAG, "set busy_timeout failed (non-fatal): ${e.message}")
       }
       db
     } catch (e: Exception) {

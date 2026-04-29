@@ -77,7 +77,10 @@ object EventDb {
       val db = SQLiteDatabase.openDatabase(
         f.absolutePath, null, SQLiteDatabase.OPEN_READWRITE
       )
-      try { db.enableWriteAheadLogging() } catch (_: Exception) { /* non-fatal */ }
+      // Rollback journal (default), NOT WAL — see LifeOsForegroundService.openLifeOsDb.
+      try {
+        db.rawQuery("PRAGMA busy_timeout = 5000", null).use { it.moveToFirst() }
+      } catch (_: Exception) { /* non-fatal */ }
       db
     } catch (e: Exception) {
       Log.e(TAG, "open failed: ${e.message}")

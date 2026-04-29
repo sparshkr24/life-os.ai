@@ -9,6 +9,7 @@ export interface LifeOsPlace {
 
 type LifeOsBridgeNative = {
   startService(): Promise<void>;
+  stopService(): Promise<void>;
   hasUsageAccess(): Promise<boolean>;
   openUsageAccessSettings(): Promise<void>;
   getStats(): Promise<{

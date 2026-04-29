@@ -10,7 +10,7 @@
  *   6. System     — collapsed by default; all the "Run … now" buttons
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import {
   eventCounts,
   getProfile,
@@ -21,7 +21,8 @@ import {
   todayLlmSpendUsd,
 } from '../repos/observability';
 import type { BehaviorProfileRow, NudgeRow } from '../db/schema';
-import { reopenDb, withDb } from '../db';
+import { clearDbCorrupt, isDbCorrupt, reopenDb, withDb } from '../db';
+import { attemptRepair } from '../db/repair';
 import { useTheme } from '../theme';
 import { LifeOsBridge } from '../bridge/lifeOsBridge';
 import { runAggregatorTick } from '../aggregator';
@@ -92,6 +93,16 @@ function shortHm(s: string): string {
   return m ? m[1] : s;
 }
 
+function fmtAge(ts: number): string {
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
+}
+
 export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -109,6 +120,8 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
   const [nudgesToday, setNudgesToday] = useState<NudgeRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [showSystem, setShowSystem] = useState(false);
+  const [corrupt, setCorrupt] = useState(false);
+  const [predictiveTs, setPredictiveTs] = useState<number | null>(null);
 
   const refresh = async () => {
     await run(
@@ -151,6 +164,15 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
         setNudgesToday(allNudges.filter((n) => n.ts >= startOfDay.getTime()).slice(0, 3));
+        setCorrupt(isDbCorrupt());
+        const today = new Date().toISOString().slice(0, 10);
+        const predRow = await withDb((db) =>
+          db.getFirstAsync<{ value: string } | null>(
+            `SELECT value FROM schema_meta WHERE key = ?`,
+            [`last_predictive_insights_ts:${today}`],
+          ),
+        );
+        setPredictiveTs(predRow?.value ? Number(predRow.value) : null);
       },
       setLoading,
     );
@@ -209,6 +231,49 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
           </Text>
         </View>
       </View>
+
+      {/* corruption banner — only shown when withDb caught a corrupt error
+          mid-session. Repair runs VACUUM-style dump-and-rebuild; user data is
+          preserved on a best-effort basis. */}
+      {corrupt && (
+        <View
+          style={[
+            s.card,
+            { borderColor: theme.err, borderWidth: 1, backgroundColor: theme.err + '14' },
+          ]}>
+          <Text style={[s.body2, { fontWeight: '700', color: theme.err }]}>
+            Database corruption detected
+          </Text>
+          <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 4 }]}>
+            Some recent writes may have failed. Tap repair to dump readable rows
+            and rebuild — most data is preserved.
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+            <RepairButton
+              onDone={(report) => {
+                if (report.ok) {
+                  clearDbCorrupt();
+                  setCorrupt(false);
+                  toast.ok(
+                    `repair ok · rescued ${report.totalRescued}, dropped ${report.totalFailed}`,
+                  );
+                  void refresh();
+                } else {
+                  toast.error('repair failed: ' + (report.error ?? 'unknown'));
+                }
+              }}
+            />
+            <Pressable
+              onPress={() => {
+                clearDbCorrupt();
+                setCorrupt(false);
+              }}
+              style={s.btnGhost}>
+              <Text style={s.btnGhostText}>Dismiss</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
 
       {/* hero score */}
       <View style={s.card}>
@@ -350,15 +415,21 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
         <View style={{ gap: 10 }}>
           <SystemRow
             title="Aggregator"
-            subtitle={agg?.registered ? '15 min · registered' : 'not registered'}
+            subtitle={
+              agg?.registered
+                ? agg.lastTickTs
+                  ? `15 min · last ${fmtAge(agg.lastTickTs)}`
+                  : '15 min · registered, no tick yet'
+                : 'not registered'
+            }
             tail={agg?.lastTickTs ? fmtTime(agg.lastTickTs) : 'never'}
             cta="Run aggregator now"
+            busyLabel="aggregating… up to 30s"
             onPress={async () => {
-              await run('aggregator', async () => {
-                const r = await runAggregatorTick();
-                if (r.ok) toast.ok(`agg ok ${r.durationMs}ms · score ${r.scoreToday ?? '—'}`);
-                else toast.error('agg failed: ' + (r.error ?? 'unknown'));
-              });
+              toast.info('aggregator… ~10s');
+              const r = await runAggregatorTick();
+              if (r.ok) toast.ok(`agg ok ${r.durationMs}ms · score ${r.scoreToday ?? '—'}`);
+              else toast.error('agg failed: ' + (r.error ?? 'unknown'));
               await refresh();
             }}
           />
@@ -367,6 +438,7 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             subtitle="60 s loop"
             tail={lastRulesTickTs() > 0 ? fmtTime(lastRulesTickTs()) : 'never'}
             cta="Run rules now"
+            busyLabel="evaluating rules…"
             onPress={async () => {
               await run('rules', async () => {
                 const r = await evaluateRules();
@@ -381,7 +453,9 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             subtitle="claude-sonnet · 03:00"
             tail={nightly ? fmtTime(nightly) : 'never'}
             cta="Run nightly now"
+            busyLabel="nightly running… 1–2 min"
             onPress={async () => {
+              toast.info('nightly… can take 1–2 min');
               await run('nightly', async () => {
                 const result = await runNightlyRebuild();
                 const firstError =
@@ -407,16 +481,33 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
               onPress={() => onTab('profile' as TabId)}
             />
           )}
+          <SystemRow
+            title="Predictive insights"
+            subtitle={
+              predictiveTs
+                ? `90 min throttle · last ${fmtAge(predictiveTs)}`
+                : '90 min throttle · not yet today'
+            }
+            tail={predictiveTs ? fmtTime(predictiveTs) : 'pending'}
+            cta="Open observe tab"
+            onPress={() => onTab('observe' as TabId)}
+          />
           {svcHealth.label !== 'live' && (
             <SystemRow
               title="Collector"
               subtitle="foreground service"
               tail={svc?.lastInsertTs ? fmtTime(svc.lastInsertTs) : 'never'}
               cta="Restart service"
+              busyLabel="restarting… up to 60s"
               onPress={async () => {
+                toast.info('restart service… ~30–60s');
                 await run('restart service', async () => {
                   await LifeOsBridge.startService();
                 });
+                // Give Android a couple of seconds to fire the first poll
+                // before we re-read getStats(), so the UI reflects the new
+                // state immediately if successful.
+                await new Promise((res) => setTimeout(res, 4000));
                 await refresh();
               }}
             />
@@ -483,21 +574,78 @@ function NudgeRowToday({
   );
 }
 
+function RepairButton({
+  onDone,
+}: {
+  onDone: (report: Awaited<ReturnType<typeof attemptRepair>>) => void;
+}) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+  const [busy, setBusy] = useState(false);
+  return (
+    <Pressable
+      disabled={busy}
+      onPress={async () => {
+        setBusy(true);
+        try {
+          // Stop the FG service first so Kotlin doesn't write into the file
+          // we're about to delete during the rebuild.
+          try {
+            await LifeOsBridge?.stopService?.();
+          } catch (e) {
+            console.warn('[repair] stopService:', (e as Error).message);
+          }
+          const report = await attemptRepair();
+          // Restart the collector after repair succeeds.
+          try {
+            await LifeOsBridge?.startService?.();
+          } catch (e) {
+            console.warn('[repair] startService:', (e as Error).message);
+          }
+          onDone(report);
+        } finally {
+          setBusy(false);
+        }
+      }}
+      style={[s.btnGhost, { borderColor: theme.err }]}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        {busy && <ActivityIndicator size="small" color={theme.err} />}
+        <Text style={[s.btnGhostText, { color: theme.err, fontWeight: '700' }]}>
+          {busy ? 'repairing… up to 60s' : 'Repair'}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
 function SystemRow({
   title,
   subtitle,
   tail,
   cta,
   onPress,
+  busyLabel,
 }: {
   title: string;
   subtitle: string;
   tail: string;
   cta: string;
-  onPress: () => void;
+  onPress: () => Promise<void> | void;
+  /** Shown in place of `cta` while the action is in flight. */
+  busyLabel?: string;
 }) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const [busy, setBusy] = useState(false);
+  const handle = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await onPress();
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <View style={s.card}>
       <View
@@ -510,8 +658,16 @@ function SystemRow({
         <Text style={[s.tdMonoSm, { color: theme.textFaint }]}>{tail}</Text>
       </View>
       <Text style={[s.tdMonoSm, { color: theme.textMuted }]}>{subtitle}</Text>
-      <Pressable onPress={onPress} style={s.btnGhost}>
-        <Text style={s.btnGhostText}>{cta} →</Text>
+      <Pressable
+        onPress={handle}
+        disabled={busy}
+        style={[s.btnGhost, busy && { opacity: 0.6 }]}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {busy && <ActivityIndicator size="small" color={theme.accent} />}
+          <Text style={s.btnGhostText}>
+            {busy ? (busyLabel ?? 'working…') : `${cta} →`}
+          </Text>
+        </View>
       </Pressable>
     </View>
   );

@@ -119,26 +119,111 @@ export function parseEvent(row: EventRow): ParsedEvent {
 /**
  * Wrapper used everywhere: runs an async fn, shows a toast on failure,
  * flips a boolean loading flag for UI feedback.
+ *
+ * `opts.expectedSeconds`: when set, immediately fires an info toast
+ * "<label>… (~Xs)" so the user knows the tap registered even when the
+ * action takes a while (e.g. restart service: 30–90 s before the FG
+ * notification re-appears).
  */
+export interface AsyncRunOpts {
+  expectedSeconds?: number;
+  setLoading?: (b: boolean) => void;
+}
 export function useAsyncRunner() {
   const toast = useToast();
   return async <T,>(
     label: string,
     fn: () => Promise<T>,
-    setLoading?: (b: boolean) => void,
+    opts?: AsyncRunOpts | ((b: boolean) => void),
   ): Promise<T | null> => {
-    setLoading?.(true);
+    // Back-compat: old call-sites pass a `setLoading` function as the 3rd arg.
+    const norm: AsyncRunOpts = typeof opts === 'function' ? { setLoading: opts } : opts ?? {};
+    norm.setLoading?.(true);
+    if (norm.expectedSeconds !== undefined) {
+      toast.info(`${label}… ~${norm.expectedSeconds}s`);
+    }
     try {
       return await fn();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('[' + label + ']', msg);
-      toast.error(label + ' failed: ' + truncate(msg, 80));
+      const parsed = parseError(e);
+      console.error('[' + label + ']', parsed.full);
+      toast.error(label + ' failed: ' + truncate(parsed.summary, 200));
       return null;
     } finally {
-      setLoading?.(false);
+      norm.setLoading?.(false);
     }
   };
+}
+
+/**
+ * Strip the noise out of native error chains so the user sees a useful
+ * one-liner in toasts and the full picture in logcat.
+ *
+ * Handles common shapes:
+ *  - expo-sqlite native rejections: "Call to function 'NativeStatement.X'
+ *    has been rejected. Caused by: <real msg>"
+ *  - SQLite errors: "Error code N: SQLITE_X: <text>"
+ *  - Bridge promise rejections: "<code>: <message>"
+ *  - Plain Error / non-Error rejections.
+ */
+export interface ParsedError {
+  /** One-line, human-readable. Safe to show in a toast. */
+  summary: string;
+  /** Multi-line detail with codes, native cause chain, etc. For logs/dialogs. */
+  full: string;
+  /** Best-guess error category. */
+  kind: 'db_corrupt' | 'db_io' | 'db_busy' | 'db_other' | 'native' | 'network' | 'unknown';
+}
+export function parseError(e: unknown): ParsedError {
+  const raw = e instanceof Error ? e.message : String(e);
+  const stack = e instanceof Error && e.stack ? e.stack : '';
+  const lower = raw.toLowerCase();
+
+  // SQLite signatures.
+  if (
+    lower.includes('database disk image is malformed') ||
+    lower.includes('sqlite_corrupt') ||
+    lower.includes('not a database')
+  ) {
+    return {
+      summary: 'database file is corrupt — tap System → Repair',
+      full: raw + (stack ? '\n' + stack : ''),
+      kind: 'db_corrupt',
+    };
+  }
+  if (lower.includes('database is locked') || lower.includes('sqlite_busy')) {
+    return { summary: 'database busy — try again', full: raw, kind: 'db_busy' };
+  }
+  if (lower.includes('disk i/o error') || lower.includes('sqlite_ioerr')) {
+    return { summary: 'disk I/O error — retry', full: raw, kind: 'db_io' };
+  }
+
+  // Native bridge: "Call to function 'X' has been rejected.\nCaused by: <Y>"
+  // The interesting part is after "Caused by:".
+  const causedBy = raw.match(/Caused by:\s*(.+?)(?:\n|$)/);
+  if (causedBy) {
+    const inner = causedBy[1].trim();
+    return {
+      summary: inner.length > 0 ? inner : raw,
+      full: raw,
+      kind: lower.includes('native') ? 'native' : 'unknown',
+    };
+  }
+
+  // Generic SQLite error code line.
+  const sqlite = raw.match(/Error code (\d+):\s*(.+?)(?:\n|$)/);
+  if (sqlite) {
+    return { summary: sqlite[2].trim(), full: raw, kind: 'db_other' };
+  }
+
+  // Network-ish.
+  if (lower.includes('network') || lower.includes('fetch') || lower.includes('timeout')) {
+    return { summary: raw.split('\n')[0] || raw, full: raw, kind: 'network' };
+  }
+
+  // Default: first non-empty line.
+  const firstLine = raw.split('\n').find((l) => l.trim().length > 0) || raw;
+  return { summary: firstLine, full: raw, kind: 'unknown' };
 }
 
 /** Spinner button used by every refresh action. */
