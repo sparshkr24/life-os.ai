@@ -72,7 +72,7 @@ function CrashScreen({ err, onReset }: { err: Error; onReset: () => void }): Rea
     <View style={[s.shell, { backgroundColor: theme.bg }]}>
       <ScrollView contentContainerStyle={s.scroll}>
         <Text style={[s.title, { color: theme.err, fontFamily: theme.monoFont }]}>
-          ✗ life.os crashed
+          ✗ LifeOs.ai crashed
         </Text>
         <Text style={[s.subtitle, { color: theme.textMuted, fontFamily: theme.monoFont }]}>
           The app caught an unhandled error. Tap retry to try again, or paste the trace below

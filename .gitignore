@@ -3,3 +3,7 @@
 lifeos.db
 lifeos.db-*
 
+# release signing — never commit
+client/android/app/lifeos-release.keystore
+client/android/keystore.properties
+

@@ -141,7 +141,7 @@ function Shell() {
   if (bootErr) {
     return (
       <View style={[styles.shell, { backgroundColor: theme.bg, padding: 24, gap: 12 }]}>
-        <Text style={[styles.title, { color: theme.text }]}>Life OS</Text>
+        <Text style={[styles.title, { color: theme.text }]}>LifeOs.ai</Text>
         <Text style={[styles.bootErr, { color: theme.err }]}>boot error: {bootErr}</Text>
       </View>
     );
@@ -156,7 +156,7 @@ function Shell() {
           <View style={styles.headerLeft}>
             <View style={[styles.brandDot, { backgroundColor: theme.accent, shadowColor: theme.accent }]} />
             <View>
-              <Text style={[styles.title, { color: theme.text, fontFamily: theme.monoFont }]}>life.os</Text>
+              <Text style={[styles.title, { color: theme.text, fontFamily: theme.monoFont }]}>LifeOs.ai</Text>
               <Text style={[styles.subtitle, { color: theme.textMuted, fontFamily: theme.monoFont }]}>
                 {tabSubtitle(tab)}
               </Text>

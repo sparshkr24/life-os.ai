@@ -6,6 +6,7 @@
  * implementation. Cents-accurate is enough — we're not billing anyone.
  */
 import { withDb } from '../db';
+import type { LlmPurpose } from '../db/schema';
 
 export async function sumTodayLlmCostUsd(): Promise<number> {
   return withDb(async (db) => {
@@ -21,7 +22,7 @@ export async function sumTodayLlmCostUsd(): Promise<number> {
 
 export interface LlmLogRow {
   ts: number;
-  purpose: 'nightly' | 'tick' | 'chat' | 'embed' | 'extract';
+  purpose: LlmPurpose;
   model: string;
   inTokens: number | null;
   outTokens: number | null;

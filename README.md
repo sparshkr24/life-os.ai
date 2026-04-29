@@ -67,6 +67,13 @@ brew install --cask db-browser-for-sqlite
 open -a "DB Browser for SQLite" lifeos.db
 ```
 
+## Release updates
+```bashbash
+# bump versionCode + versionName in client/android/app/build.gradle
+cd client/android && ./gradlew assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
 ## Stage status
 
 See the table in [CLAUDE.md](CLAUDE.md#stage-tracker).

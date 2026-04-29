@@ -19,6 +19,7 @@ import { getProviderKey } from './keys';
 import { sumTodayLlmCostUsd, logLlmCall } from './ledger';
 import { findModel, DEFAULT_TASK_MODELS } from './models';
 import { getChatProvider, getEmbedProvider } from './providers/registry';
+import type { LlmPurpose } from '../db/schema';
 import type {
   ChatRequest,
   ChatResponse,
@@ -30,7 +31,7 @@ import type {
 /** Daily spend cap. Hard wall — same value the smart-nudge tick used. */
 export const DAILY_COST_CAP_USD = 0.30;
 
-const TASK_TO_PURPOSE: Record<TaskKind, 'nightly' | 'tick' | 'chat' | 'embed' | 'extract'> = {
+const TASK_TO_PURPOSE: Record<TaskKind, LlmPurpose> = {
   nightly: 'nightly',
   chat: 'chat',
   smart_nudge: 'tick',
@@ -42,6 +43,7 @@ const TASK_TO_PURPOSE: Record<TaskKind, 'nightly' | 'tick' | 'chat' | 'embed' | 
 export async function runChatTask(
   task: TaskKind,
   request: ChatRequest,
+  purposeOverride?: LlmPurpose,
 ): Promise<ChatTaskResult> {
   if (task === 'embed') {
     return { kind: 'failed', reason: 'embed routed via runEmbedTask' };
@@ -62,7 +64,7 @@ export async function runChatTask(
   if (!apiKey) return { kind: 'skipped', reason: 'no_key' };
 
   const provider = getChatProvider(assigned.provider);
-  const purpose = TASK_TO_PURPOSE[task];
+  const purpose = purposeOverride ?? TASK_TO_PURPOSE[task];
   const startedAt = Date.now();
 
   try {

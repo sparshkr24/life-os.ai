@@ -9,7 +9,29 @@ import type { LlmCallRow } from '../db/schema';
 import { useTheme } from '../theme';
 import { fmtTimeShort, makeStyles, useAsyncRunner } from './shared';
 
-const PURPOSES: LlmPurposeFilter[] = ['all', 'nightly', 'tick', 'chat'];
+const PURPOSES: LlmPurposeFilter[] = [
+  'all',
+  'nightly_memory',
+  'nightly_profile',
+  'nightly_nudge',
+  'chat',
+  'embed',
+  'extract',
+  'tick',
+];
+
+// Short labels for the chip row — the raw purpose names get long.
+const PURPOSE_LABELS: Record<LlmPurposeFilter, string> = {
+  all: 'all',
+  nightly: 'nightly',
+  nightly_memory: 'memory',
+  nightly_profile: 'profile',
+  nightly_nudge: 'nudge',
+  chat: 'chat',
+  embed: 'embed',
+  extract: 'extract',
+  tick: 'tick',
+};
 
 export function LlmTable() {
   const { theme } = useTheme();
@@ -53,7 +75,9 @@ export function LlmTable() {
             key={p}
             onPress={() => setPurpose(p)}
             style={[s.chipSm, purpose === p && s.chipActive]}>
-            <Text style={[s.chipText, purpose === p && s.chipTextActive]}>{p}</Text>
+            <Text style={[s.chipText, purpose === p && s.chipTextActive]}>
+              {PURPOSE_LABELS[p]}
+            </Text>
           </Pressable>
         ))}
       </View>

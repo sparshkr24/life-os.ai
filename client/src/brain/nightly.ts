@@ -764,12 +764,18 @@ async function runToolLoop(args: ToolLoopArgs): Promise<string | null> {
   const toolDefs: ToolDefinition[] = tools.defs;
 
   for (let loop = 0; loop < args.maxLoops; loop += 1) {
-    const callRes = await runChatTask('nightly', {
-      system: args.system,
-      messages,
-      tools: toolDefs,
-      maxOutputTokens: args.maxOutputTokens,
-    });
+    const callRes = await runChatTask(
+      'nightly',
+      {
+        system: args.system,
+        messages,
+        tools: toolDefs,
+        maxOutputTokens: args.maxOutputTokens,
+      },
+      // Override the log purpose with the scope so each pass is
+      // distinguishable in `llm_calls` (nightly_memory / _profile / _nudge).
+      args.scope,
+    );
 
     if (callRes.kind === 'skipped') {
       args.report.skipped = callRes.reason === 'cap_exceeded' ? 'cost_cap' : 'no_key';

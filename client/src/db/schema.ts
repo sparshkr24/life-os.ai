@@ -231,7 +231,15 @@ export type AppSubcategory = string;
 export type TodoStatus = 'open' | 'done' | 'snoozed' | 'dropped';
 export type RemindStrategy = 'fixed' | 'context' | 'none';
 export type NudgeSource = 'rule' | 'smart' | 'todo';
-export type LlmPurpose = 'nightly' | 'tick' | 'chat' | 'embed' | 'extract';
+export type LlmPurpose =
+  | 'nightly'
+  | 'nightly_memory'
+  | 'nightly_profile'
+  | 'nightly_nudge'
+  | 'tick'
+  | 'chat'
+  | 'embed'
+  | 'extract';
 export type LlmModel = 'claude-sonnet-4-x' | 'gpt-4o-mini';
 
 export interface EventRow {

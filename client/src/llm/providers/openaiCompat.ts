@@ -61,10 +61,13 @@ export class OpenAiCompatChatProvider implements ChatProvider {
 
   async chat(model: string, apiKey: string, req: ChatRequest): Promise<ChatResponse> {
     const wireMessages = toWireMessages(req);
+    // OpenAI's newer models (gpt-5, o-series) reject `max_tokens` and require
+    // `max_completion_tokens`. MiniMax and DeepSeek still use the legacy name.
+    const tokenLimitKey = this.id === 'openai' ? 'max_completion_tokens' : 'max_tokens';
     const body: Record<string, unknown> = {
       model,
       messages: wireMessages,
-      max_tokens: req.maxOutputTokens ?? 1024,
+      [tokenLimitKey]: req.maxOutputTokens ?? 1024,
     };
     if (req.temperature !== undefined) body.temperature = req.temperature;
     if (req.jsonMode) body.response_format = { type: 'json_object' };

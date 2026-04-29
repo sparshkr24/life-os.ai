@@ -108,12 +108,29 @@ export async function listMonthlyRollups(f: RollupFilter): Promise<MonthlyRollup
   });
 }
 
-export type LlmPurposeFilter = 'all' | 'nightly' | 'tick' | 'chat' | 'embed' | 'extract';
+export type LlmPurposeFilter =
+  | 'all'
+  | 'nightly'
+  | 'nightly_memory'
+  | 'nightly_profile'
+  | 'nightly_nudge'
+  | 'tick'
+  | 'chat'
+  | 'embed'
+  | 'extract';
 
 export async function listLlmCalls(purpose: LlmPurposeFilter, limit = 200): Promise<LlmCallRow[]> {
   return withDb(async (db) => {
     if (purpose === 'all') {
       return db.getAllAsync<LlmCallRow>('SELECT * FROM llm_calls ORDER BY ts DESC LIMIT ?', [limit]);
+    }
+    if (purpose === 'nightly') {
+      // 'nightly' filter shows the legacy bucket only. The three split
+      // scopes (memory/profile/nudge) have their own pills.
+      return db.getAllAsync<LlmCallRow>(
+        "SELECT * FROM llm_calls WHERE purpose = 'nightly' ORDER BY ts DESC LIMIT ?",
+        [limit],
+      );
     }
     return db.getAllAsync<LlmCallRow>(
       'SELECT * FROM llm_calls WHERE purpose = ? ORDER BY ts DESC LIMIT ?',
