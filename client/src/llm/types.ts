@@ -29,6 +29,7 @@ export type TaskKind =
   | 'smart_nudge'     // Stage 7 — 15-min decision to nudge or stay silent
   | 'consolidation'   // Reserved — weekly memory merge (future)
   | 'rule_generation' // Stage 14 — weekly LLM-generated rules (future)
+  | 'proactive_question' // v7 — 90-min proactive question pass (gpt-4o-mini class)
   | 'embed';          // Stage 12 — text → vector for memory store
 
 /** Capability flags a model declares so the router can validate assignments. */

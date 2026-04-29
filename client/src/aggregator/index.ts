@@ -16,6 +16,7 @@ import { withDb } from '../db';
 import { cleanupRawEvents } from '../ingest/cleanup';
 import { computeProductivityScore } from '../brain/productivityScore';
 import { maybeRebuildPredictiveInsights } from '../brain/predictiveInsights';
+import { maybeRunProactiveQuestion, expireOldProactiveQuestions } from '../brain/proactive';
 import { rebuildDailyRollup } from './rollup';
 import { classifySilences } from './silence';
 import { foldMonth } from './monthlyFold';
@@ -70,6 +71,22 @@ export async function runAggregatorTick(): Promise<TickReport> {
       } catch (e) {
         console.error(
           '[aggregator] predictive-insights crashed:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
+      // v7: proactive AI questions. Cheap detectors gate the LLM call;
+      // hard-throttled (≥120 min between, ≤3/day, no pending row, …).
+      try {
+        const expired = await expireOldProactiveQuestions(db, t0);
+        if (expired > 0) console.log(`[aggregator] proactive expired=${expired}`);
+        const pq = await maybeRunProactiveQuestion(db, t0, tz);
+        if (pq.ran) {
+          console.log(`[aggregator] proactive asked id=${pq.questionId} kind=${pq.trigger}`);
+        }
+      } catch (e) {
+        console.error(
+          '[aggregator] proactive crashed:',
           e instanceof Error ? e.message : String(e),
         );
       }

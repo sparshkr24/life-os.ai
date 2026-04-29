@@ -37,6 +37,7 @@ const TASK_TO_PURPOSE: Record<TaskKind, LlmPurpose> = {
   smart_nudge: 'tick',
   consolidation: 'nightly', // batched into nightly purpose for now
   rule_generation: 'nightly',
+  proactive_question: 'proactive_question',
   embed: 'embed',
 };
 

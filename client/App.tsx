@@ -10,7 +10,7 @@
  */
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Keyboard, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   useFonts,
   JetBrainsMono_400Regular,
@@ -21,6 +21,8 @@ import { migrate } from './src/db';
 import { LifeOsBridge } from './src/bridge/lifeOsBridge';
 import { registerAggregatorTask } from './src/aggregator/worker';
 import { startRulesForegroundLoop } from './src/rules/worker';
+import { handleProactiveNotificationResponse } from './src/brain/proactiveResponse';
+import * as Notifications from 'expo-notifications';
 import {
   TodayScreen,
   ObservabilityScreen,
@@ -28,6 +30,7 @@ import {
   ProfileScreen,
   SettingsScreen,
   AiModelsScreen,
+  PlacesScreen,
   type TabId,
 } from './src/screens';
 import { ThemeProvider, useTheme } from './src/theme';
@@ -111,8 +114,23 @@ function Shell() {
   const [tab, setTab] = useState<TabId>('today');
   const [bootErr, setBootErr] = useState<string | null>(null);
   const [usageGranted, setUsageGranted] = useState<boolean | null>(null);
+  const [keyboardUp, setKeyboardUp] = useState(false);
 
   const native = Platform.OS === 'android' && !!LifeOsBridge;
+
+  // Hide the FloatingNav whenever the soft keyboard is visible — it would
+  // otherwise either overlap the keyboard (Android edge-to-edge) or sit on
+  // top of bottom-anchored TextInputs.
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const a = Keyboard.addListener(showEvt, () => setKeyboardUp(true));
+    const b = Keyboard.addListener(hideEvt, () => setKeyboardUp(false));
+    return () => {
+      a.remove();
+      b.remove();
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -134,6 +152,17 @@ function Shell() {
         toast.error('Boot failed: ' + msg);
       }
     })();
+    // Proactive-question notification action listener (v7). Fires when the
+    // user taps Yes/No/Reply on a proactive notification. Returns a
+    // subscription we tear down on unmount.
+    const sub = Notifications.addNotificationResponseReceivedListener((resp) => {
+      handleProactiveNotificationResponse(resp).catch((e: unknown) => {
+        console.error('[boot] proactive response failed:', e);
+      });
+    });
+    return () => {
+      sub.remove();
+    };
     // run once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -182,18 +211,22 @@ function Shell() {
         {tab === 'chat' && <ChatScreen />}
         {tab === 'profile' && <ProfileScreen onBack={() => setTab('settings')} />}
         {tab === 'aimodels' && <AiModelsScreen onBack={() => setTab('settings')} />}
+        {tab === 'places' && <PlacesScreen onBack={() => setTab('settings')} />}
         {tab === 'settings' && (
           <SettingsScreen
             onOpenProfile={() => setTab('profile')}
             onOpenAiModels={() => setTab('aimodels')}
+            onOpenPlaces={() => setTab('places')}
           />
         )}
       </View>
 
-      <FloatingNav
-        tab={tab === 'profile' || tab === 'aimodels' ? 'settings' : tab}
-        onTab={setTab}
-      />
+      {!keyboardUp && (
+        <FloatingNav
+          tab={tab === 'profile' || tab === 'aimodels' || tab === 'places' ? 'settings' : tab}
+          onTab={setTab}
+        />
+      )}
 
       <StatusBar style={theme.statusBarStyle} />
     </View>
@@ -212,6 +245,8 @@ function tabSubtitle(t: TabId): string {
       return "the AI's model of you";
     case 'aimodels':
       return 'providers · routing';
+    case 'places':
+      return 'geofenced locations';
     case 'settings':
       return 'theme · keys · profile';
   }

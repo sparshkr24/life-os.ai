@@ -84,6 +84,7 @@ export const DEFAULT_TASK_MODELS: Record<TaskKind, string> = {
   smart_nudge: 'gpt-5.4-mini',
   consolidation: 'gpt-5.4-mini',
   rule_generation: 'gpt-5.4-mini',
+  proactive_question: 'gpt-5.4-mini',
   embed: 'text-embedding-3-small',
 };
 
@@ -97,6 +98,7 @@ export const ASSIGNABLE_TASKS: readonly TaskKind[] = [
   'smart_nudge',
   'consolidation',
   'rule_generation',
+  'proactive_question',
 ];
 
 export const TASK_LABELS: Record<TaskKind, string> = {
@@ -105,6 +107,7 @@ export const TASK_LABELS: Record<TaskKind, string> = {
   smart_nudge: 'Smart nudges',
   consolidation: 'Memory consolidation',
   rule_generation: 'Rule generation',
+  proactive_question: 'Proactive questions',
   embed: 'Embeddings',
 };
 
@@ -114,5 +117,6 @@ export const TASK_DESCRIPTIONS: Record<TaskKind, string> = {
   smart_nudge: 'Every 15 min. Decides whether to fire a nudge.',
   consolidation: 'Reserved for future weekly memory merge pass.',
   rule_generation: 'Weekly. Writes deterministic nudge rules.',
+  proactive_question: 'Every 90 min when patterns are detected. Asks at most ~3 questions/day.',
   embed: 'Embeddings for the memory store.',
 };

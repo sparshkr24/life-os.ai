@@ -30,6 +30,14 @@ type LifeOsBridgeNative = {
   setGeofences(places: LifeOsPlace[]): Promise<number>;
   removeAllGeofences(): Promise<void>;
 
+  // v7 — one-shot current location for the Places UI / proactive questions.
+  getCurrentLocation(): Promise<{
+    lat: number;
+    lng: number;
+    accuracyM: number;
+    ts: number;
+  }>;
+
   // Stage 3c — NotificationListener.
   hasNotificationListenerAccess(): Promise<boolean>;
   openNotificationListenerSettings(): Promise<void>;

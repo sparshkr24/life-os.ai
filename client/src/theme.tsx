@@ -80,6 +80,8 @@ const darkKindColors: KindColors = {
   heart_rate: '#ef4444',
   inferred_activity: '#14b8a6',
   user_clarification: '#facc15',
+  ai_question: '#c084fc',
+  ai_question_response: '#a78bfa',
 };
 
 const lightKindColors: KindColors = {
@@ -97,6 +99,8 @@ const lightKindColors: KindColors = {
   heart_rate: '#b91c1c',
   inferred_activity: '#0d9488',
   user_clarification: '#ca8a04',
+  ai_question: '#9333ea',
+  ai_question_response: '#7c3aed',
 };
 
 const modernKindColors: KindColors = {
@@ -114,6 +118,8 @@ const modernKindColors: KindColors = {
   heart_rate: '#e11d48',
   inferred_activity: '#2dd4bf',
   user_clarification: '#fde047',
+  ai_question: '#d8b4fe',
+  ai_question_response: '#c4b5fd',
 };
 
 const dark: ThemeTokens = {

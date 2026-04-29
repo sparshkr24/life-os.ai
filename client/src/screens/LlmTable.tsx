@@ -83,10 +83,8 @@ export function LlmTable() {
       </View>
       <Text style={s.muted}>today's spend: ${spend.toFixed(4)}</Text>
       <View style={s.tableHeader}>
-        <Text style={[s.thCell, { flex: 1.4 }]}>Time</Text>
         <Text style={[s.thCell, { flex: 1 }]}>Purpose</Text>
-        <Text style={[s.thCell, { flex: 1.2 }]}>Model</Text>
-        <Text style={[s.thCell, { flex: 0.8 }]}>$</Text>
+        <Text style={[s.thCell, { flex: 1, textAlign: 'right' }]}>Model</Text>
       </View>
       <ScrollView style={s.list} contentContainerStyle={{ paddingBottom: 120 }}>
         {loading && rows.length === 0 && (
@@ -100,16 +98,28 @@ export function LlmTable() {
         )}
         {rows.map((r) => {
           const isOpen = expanded === r.id;
+          const cost = (r.cost_usd ?? 0).toFixed(4);
           return (
             <Pressable key={r.id} onPress={() => setExpanded(isOpen ? null : r.id)} style={s.tr}>
-              <View style={{ flexDirection: 'row', width: '100%' }}>
-                <Text style={[s.tdMono, { flex: 1.4 }]}>{fmtTimeShort(r.ts)}</Text>
-                <Text style={[s.td, { flex: 1 }]}>{r.purpose}</Text>
-                <Text style={[s.tdMono, { flex: 1.2 }]}>{r.model}</Text>
-                <Text
-                  style={[s.tdMono, { flex: 0.8, color: r.ok ? theme.text : theme.err }]}>
-                  {(r.cost_usd ?? 0).toFixed(4)}
-                </Text>
+              <View style={{ flexDirection: 'row', width: '100%', alignItems: 'flex-start' }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.td} numberOfLines={1}>
+                    {PURPOSE_LABELS[r.purpose as LlmPurposeFilter] ?? r.purpose}
+                  </Text>
+                  <Text style={[s.tdMonoSm, { color: theme.textFaint, marginTop: 2 }]}>
+                    {fmtTimeShort(r.ts)}
+                  </Text>
+                </View>
+                <View style={{ flex: 1, alignItems: 'flex-end' }}>
+                  <Text
+                    style={[s.tdMono, { color: r.ok ? theme.text : theme.err }]}
+                    numberOfLines={1}>
+                    {shortModelId(r.model)}
+                  </Text>
+                  <Text style={[s.tdMonoSm, { color: theme.textFaint, marginTop: 2 }]}>
+                    ${cost}
+                  </Text>
+                </View>
               </View>
               {isOpen && (
                 <View style={{ marginTop: 6, gap: 6 }}>
@@ -117,6 +127,8 @@ export function LlmTable() {
                   <Text style={s.tdMono}>
                     in: {r.in_tokens ?? '?'} · out: {r.out_tokens ?? '?'}
                   </Text>
+                  <Text style={s.subLabel}>full model id</Text>
+                  <Text style={s.tdMono}>{r.model}</Text>
                   {r.error && (
                     <>
                       <Text style={s.subLabel}>error</Text>
@@ -135,4 +147,20 @@ export function LlmTable() {
       </ScrollView>
     </View>
   );
+}
+
+/**
+ * Strip trailing date / version suffixes from a model id for compact display.
+ * Examples:
+ *   gpt-5.4-mini-2026-03-17        → gpt-5.4-mini
+ *   claude-sonnet-4-5-20250901     → claude-sonnet-4-5
+ *   text-embedding-3-small         → text-embedding-3-small (untouched)
+ *   minimax-text-01                → minimax-text-01 (untouched)
+ */
+function shortModelId(id: string): string {
+  if (!id) return '—';
+  // Trailing -YYYYMMDD or -YYYY-MM-DD
+  return id
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-\d{8}$/, '');
 }

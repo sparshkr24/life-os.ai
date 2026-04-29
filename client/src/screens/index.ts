@@ -6,4 +6,5 @@ export { ChatScreen } from './Chat';
 export { ProfileScreen } from './Profile';
 export { SettingsScreen } from './Settings';
 export { AiModelsScreen } from './AiModels';
+export { PlacesScreen } from './Places';
 export type { TabId } from './shared';

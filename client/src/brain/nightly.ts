@@ -588,6 +588,15 @@ async function runNudgePass(yesterday: string): Promise<PassReport> {
   const report: PassReport = { ...EMPTY_PASS };
   try {
     const inputs = await loadNudgePassInputs();
+    // Skip the LLM entirely when there's nothing to refine and nothing to
+    // ground new rules in. Saves a tool-loop session and avoids the model
+    // being told "create rules" with an empty memory pool (which produces
+    // hallucinated, ungrounded rules that we end up disabling next night).
+    if (inputs.llmRules.length === 0 && inputs.topActionableMemories.length === 0) {
+      console.log('[nightly:nudge] skipped — no llm rules and no actionable memories');
+      report.ok = true;
+      return report;
+    }
     const userPrompt = buildNudgeUserPrompt(yesterday, inputs);
 
     const finalText = await runToolLoop({

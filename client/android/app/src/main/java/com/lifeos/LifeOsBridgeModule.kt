@@ -253,6 +253,60 @@ class LifeOsBridgeModule(private val ctx: ReactApplicationContext) :
     }
   }
 
+  // ─── v7: one-shot current location for Places UI / proactive questions ────
+
+  @ReactMethod
+  fun getCurrentLocation(promise: Promise) {
+    if (!check("android.permission.ACCESS_FINE_LOCATION")) {
+      promise.reject("no_permission", "ACCESS_FINE_LOCATION not granted")
+      return
+    }
+    try {
+      val client = com.google.android.gms.location.LocationServices
+        .getFusedLocationProviderClient(ctx)
+      val token = com.google.android.gms.tasks.CancellationTokenSource()
+      client.getCurrentLocation(
+        com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
+        token.token,
+      )
+        .addOnSuccessListener { loc: android.location.Location? ->
+          if (loc == null) {
+            // FusedLocationProvider can return null when no fix is available
+            // yet (cold start, indoors). Fall back to lastLocation.
+            client.lastLocation
+              .addOnSuccessListener { last ->
+                if (last == null) {
+                  promise.reject("no_fix", "No location available")
+                } else {
+                  promise.resolve(toLocMap(last))
+                }
+              }
+              .addOnFailureListener { e ->
+                promise.reject("loc_failed", e.message ?: "unknown", e)
+              }
+          } else {
+            promise.resolve(toLocMap(loc))
+          }
+        }
+        .addOnFailureListener { e ->
+          promise.reject("loc_failed", e.message ?: "unknown", e)
+        }
+    } catch (e: SecurityException) {
+      promise.reject("no_permission", e.message ?: "unknown", e)
+    } catch (e: Exception) {
+      promise.reject("loc_failed", e.message ?: "unknown", e)
+    }
+  }
+
+  private fun toLocMap(loc: android.location.Location): WritableMap {
+    val m: WritableMap = Arguments.createMap()
+    m.putDouble("lat", loc.latitude)
+    m.putDouble("lng", loc.longitude)
+    m.putDouble("accuracyM", loc.accuracy.toDouble())
+    m.putDouble("ts", loc.time.toDouble())
+    return m
+  }
+
   // ─── Stage 3c: NotificationListener access ────────────────────────────────
 
   @ReactMethod

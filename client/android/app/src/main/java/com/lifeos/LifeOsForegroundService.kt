@@ -53,6 +53,13 @@ class LifeOsForegroundService : Service() {
           Log.e(TAG, "hc poll failed", e)
         }
       }
+      // Hardware step-counter fallback. Cheap to call every minute; only
+      // writes a row when ≥5 min and ≥1 step have accumulated.
+      try {
+        StepCounterCollector.flushIfDue()
+      } catch (e: Exception) {
+        Log.e(TAG, "step flush failed", e)
+      }
       handler.postDelayed(this, POLL_INTERVAL_MS)
     }
   }
@@ -105,6 +112,21 @@ class LifeOsForegroundService : Service() {
     // ACTIVITY_RECOGNITION yet — they get retried on every service restart.
     registerActivityTransitions()
     registerSleepUpdates()
+
+    // Hardware step counter — also gated by ACTIVITY_RECOGNITION on Q+.
+    // Same permission check is implicit: on devices where the perm is
+    // missing, registerListener returns false and `flushIfDue` becomes a
+    // noop. Used as a fallback when Health Connect isn't usable
+    // (iQOO/Vivo/Honor without HC whitelisting).
+    if (hasActivityRecognitionPermission()) {
+      try {
+        StepCounterCollector.start(this)
+      } catch (e: Exception) {
+        Log.e(TAG, "step counter start failed", e)
+      }
+    } else {
+      Log.w(TAG, "skip step counter — ACTIVITY_RECOGNITION not granted")
+    }
 
     // Stage 8: schedule the daily 03:05 nightly kicker. Idempotent.
     NightlyAlarmReceiver.schedule(this)
@@ -192,6 +214,11 @@ class LifeOsForegroundService : Service() {
 
   override fun onDestroy() {
     handler.removeCallbacks(pollTask)
+    try {
+      StepCounterCollector.stop()
+    } catch (e: Exception) {
+      Log.w(TAG, "step counter stop: ${e.message}")
+    }
     Log.i(TAG, "onDestroy")
     super.onDestroy()
   }

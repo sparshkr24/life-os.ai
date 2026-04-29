@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -29,11 +30,25 @@ export function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [spend, setSpend] = useState(0);
   const [lastCost, setLastCost] = useState<number | null>(null);
+  const [kbUp, setKbUp] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
   useEffect(() => {
     todayLlmSpendUsd().then(setSpend).catch(() => {});
   }, [messages.length]);
+
+  // Keyboard tracking — when up the FloatingNav is hidden by App.tsx, so we
+  // can drop the 110 px reservation we keep when the nav is visible.
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const a = Keyboard.addListener(showEvt, () => setKbUp(true));
+    const b = Keyboard.addListener(hideEvt, () => setKbUp(false));
+    return () => {
+      a.remove();
+      b.remove();
+    };
+  }, []);
 
   const send = async () => {
     const text = input.trim();
@@ -94,7 +109,8 @@ export function ChatScreen() {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}>
       <ScrollView
         ref={scrollRef}
         style={s.list}
@@ -138,7 +154,7 @@ export function ChatScreen() {
           {lastCost != null && ` · last reply $${lastCost.toFixed(5)}`}
         </Text>
       </View>
-      <View style={[s.toolbar, { paddingBottom: 110 }]}>
+      <View style={[s.toolbar, { paddingBottom: kbUp ? 10 : 110 }]}>
         <TextInput
           placeholder="Ask anything…"
           placeholderTextColor={theme.inputPlaceholder}

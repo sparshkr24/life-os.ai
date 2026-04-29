@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import { listEvents, eventTotalCount } from '../repos/observability';
 import type { EventRow } from '../db/schema';
-import { reopenDb } from '../db';
 import { useTheme } from '../theme';
 import {
   ActionButton,
@@ -52,11 +51,10 @@ export function EventsTable() {
     const result = await run(
       'events',
       async () => {
-        // Force a fresh JS connection so writes from the Kotlin foreground
-        // service (a separate SQLiteDatabase handle in this process) are
-        // visible — expo-sqlite's long-lived connection can otherwise hold a
-        // stale WAL read snapshot.
-        await reopenDb();
+        // Journal mode is DELETE (not WAL) — every read sees committed writes
+        // from Kotlin without needing to drop the cached connection. Closing
+        // mid-flight here used to race concurrent withDb callers and surface
+        // as 'Access to closed resource' warnings.
         const [list, t] = await Promise.all([
           listEvents({ limit: PAGE_SIZE, offset: 0 }),
           eventTotalCount(),

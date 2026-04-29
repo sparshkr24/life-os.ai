@@ -32,9 +32,11 @@ import { SectionHeader, StatusDot } from './widgets';
 export function SettingsScreen({
   onOpenProfile,
   onOpenAiModels,
+  onOpenPlaces,
 }: {
   onOpenProfile: () => void;
   onOpenAiModels: () => void;
+  onOpenPlaces: () => void;
 }) {
   const { theme, setTheme } = useTheme();
   const s = makeStyles(theme);
@@ -140,6 +142,27 @@ export function SettingsScreen({
       {/* TRACKING PERMISSIONS */}
       <SectionHeader>Tracking permissions</SectionHeader>
       <PermissionsCard />
+
+      {/* PLACES — geofenced locations (v7) */}
+      <SectionHeader>Places &amp; geofences</SectionHeader>
+      <Pressable onPress={onOpenPlaces}>
+        <View style={s.card}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+            }}>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.body2, { fontWeight: '700' }]}>Places</Text>
+              <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
+                Add Home / Office / Gym so the AI learns your routine
+              </Text>
+            </View>
+            <Text style={[s.tdMono, { color: theme.accent, fontWeight: '700' }]}>Open →</Text>
+          </View>
+        </View>
+      </Pressable>
 
       {/* AI MODELS — navigates to AiModels screen for providers + routing */}
       <SectionHeader>AI models</SectionHeader>

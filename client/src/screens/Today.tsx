@@ -21,7 +21,7 @@ import {
   todayLlmSpendUsd,
 } from '../repos/observability';
 import type { BehaviorProfileRow, NudgeRow } from '../db/schema';
-import { clearDbCorrupt, isDbCorrupt, reopenDb, withDb } from '../db';
+import { clearDbCorrupt, isDbCorrupt, withDb } from '../db';
 import { attemptRepair } from '../db/repair';
 import { useTheme } from '../theme';
 import { LifeOsBridge } from '../bridge/lifeOsBridge';
@@ -31,6 +31,7 @@ import { evaluateRules } from '../rules/engine';
 import { lastRulesTickTs } from '../rules/worker';
 import { runNightlyRebuild, lastNightlyTs } from '../brain/nightly';
 import { useToast } from '../toast';
+import { PendingQuestionCard } from '../components/PendingQuestionCard';
 import {
   ActionButton,
   fmtClock,
@@ -127,7 +128,6 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
     await run(
       'today',
       async () => {
-        await reopenDb();
         const native = Platform.OS === 'android' && !!LifeOsBridge;
         const [c, sp, p, st, taskState, lastTick, latest, history, allNudges] = await Promise.all([
           eventCounts(),
@@ -206,6 +206,8 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
 
   return (
     <ScrollView contentContainerStyle={s.body}>
+      {/* v7: pending proactive AI question, if any. Renders nothing when none. */}
+      <PendingQuestionCard />
       {/* date + live tracking pill */}
       <View
         style={{

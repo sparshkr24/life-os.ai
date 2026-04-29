@@ -8,7 +8,20 @@
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
  */
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
+
+/**
+ * v7 (2026-04-30) — additive only. Proactive AI questions.
+ *  - new table `proactive_questions`: rows the eligibility scanner + LLM
+ *    create when the phone notices a possibly-meaningful pattern (long
+ *    dwell at an unknown spot, no phone usage on a usually-active evening,
+ *    weekend night dwell, etc). User answers via interactive notification
+ *    or in-app card; the answer is materialised into a `memories` row and
+ *    optionally a new `places` row.
+ *  - new EventKind values: 'ai_question', 'ai_question_response'.
+ *  - new LlmPurpose: 'proactive_question'.
+ * No DROP, no RENAME.
+ */
 
 /**
  * v6 (2026-04-29) — additive only. Stage 14 (LLM-generated rules).
@@ -197,6 +210,33 @@ export const PHONE_SCHEMA_SQL: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(archived_ts, last_accessed);`,
   `CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);`,
   `CREATE INDEX IF NOT EXISTS idx_memories_rollup ON memories(rollup_date);`,
+
+  // v7 — proactive AI questions.
+  // status: 'pending' (notification fired, no answer yet)
+  //       | 'answered' (user replied; response_text holds the answer)
+  //       | 'dismissed' (user swiped the notification away)
+  //       | 'expired'  (older than 24h with no response).
+  // suggested_lat/lng are captured at question time when the trigger is a
+  // location-dwell, so an 'answered' response that names a place can be
+  // saved to `places` without re-reading GPS.
+  `CREATE TABLE IF NOT EXISTS proactive_questions (
+    id TEXT PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    trigger_payload TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    options TEXT NOT NULL,
+    expected_kind TEXT NOT NULL DEFAULT 'free_text',
+    suggested_lat REAL,
+    suggested_lng REAL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    response_text TEXT,
+    response_ts INTEGER,
+    llm_call_id INTEGER,
+    memory_id TEXT,
+    notification_id TEXT
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_proactive_questions_status ON proactive_questions(status, ts);`,
 ];
 
 export type EventKind =
@@ -215,7 +255,11 @@ export type EventKind =
   // v3: written by the aggregator's silence classifier.
   | 'inferred_activity'
   // v3: written when the user answers the silence-prompt nudge.
-  | 'user_clarification';
+  | 'user_clarification'
+  // v7: a proactive AI question was fired. Payload mirrors `proactive_questions`.
+  | 'ai_question'
+  // v7: user replied to a proactive question. Payload: {question_id, answer}.
+  | 'ai_question_response';
 
 export type AppCategory = 'productive' | 'neutral' | 'unproductive';
 
@@ -239,7 +283,8 @@ export type LlmPurpose =
   | 'tick'
   | 'chat'
   | 'embed'
-  | 'extract';
+  | 'extract'
+  | 'proactive_question';
 export type LlmModel = 'claude-sonnet-4-x' | 'gpt-4o-mini';
 
 export interface EventRow {
@@ -337,6 +382,40 @@ export interface PlaceRow {
   lat: number;
   lng: number;
   radius_m: number;
+}
+
+// v7 — proactive AI questions.
+
+export type ProactiveTriggerKind =
+  | 'long_dwell_unknown'      // ≥ N min still in same spot, no known geofence
+  | 'no_phone_usage'          // ≥ N min with zero app_fg during normally-active hours
+  | 'weekend_late_night'      // Sat/Sun 22:00–02:00 dwell
+  | 'unusual_hour_at_place'   // at a known place at an unusual time of day
+  | 'ad_hoc';                 // chat tool fired by the AI in conversation
+
+export type ProactiveQuestionStatus = 'pending' | 'answered' | 'dismissed' | 'expired';
+
+export type ProactiveExpectedKind = 'yes_no' | 'place_name' | 'free_text';
+
+export interface ProactiveQuestionRow {
+  id: string;
+  ts: number;
+  trigger_kind: ProactiveTriggerKind;
+  /** JSON-encoded snapshot of what fired the trigger (durations, place ids, …). */
+  trigger_payload: string;
+  prompt: string;
+  /** JSON-encoded string[]. */
+  options: string;
+  expected_kind: ProactiveExpectedKind;
+  suggested_lat: number | null;
+  suggested_lng: number | null;
+  status: ProactiveQuestionStatus;
+  response_text: string | null;
+  response_ts: number | null;
+  llm_call_id: number | null;
+  memory_id: string | null;
+  /** expo-notifications request id (so we can dismiss when answered in-app). */
+  notification_id: string | null;
 }
 
 // v4 — memory store.

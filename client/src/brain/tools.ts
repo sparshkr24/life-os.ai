@@ -383,14 +383,14 @@ add({
   def: {
     name: 'get_events_window',
     description:
-      'Bounded raw-event read. Returns up to `limit` events (max 500) between `start_ts` and `end_ts`, optionally filtered by `kinds`. Use sparingly — prefer get_daily_rollup.',
+      "Bounded raw-event read. Returns up to `limit` events (max 1000) between `start_ts` and `end_ts` (epoch ms), optionally filtered by `kinds`. PREFERRED for precise timing/duration questions ('how long in office today?', 'when did I leave gym?'). Pair kinds=['geo_enter','geo_exit'] with list_places to compute place dwell.",
     parameters: {
       type: 'object',
       properties: {
         start_ts: { type: 'integer' },
         end_ts: { type: 'integer' },
         kinds: { type: 'array', items: { type: 'string' } },
-        limit: { type: 'integer', minimum: 1, maximum: 500 },
+        limit: { type: 'integer', minimum: 1, maximum: 1000 },
       },
       required: ['start_ts', 'end_ts'],
     },
@@ -402,7 +402,7 @@ add({
     if (!isFinite(startTs) || !isFinite(endTs) || endTs <= startTs) {
       return { error: 'invalid range' };
     }
-    const limit = clampInt(args.limit, 1, 500, 200);
+    const limit = clampInt(args.limit, 1, 1000, 300);
     const kinds = Array.isArray(args.kinds)
       ? (args.kinds as unknown[])
           .filter((k): k is EventKind =>
@@ -641,6 +641,350 @@ add({
     if (!id) return { error: 'id required' };
     await archiveMemory(id);
     return { id, archived: true };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// CHAT writes (v7 — places, memory, proactive question)
+// ─────────────────────────────────────────────────────────────────────────
+
+add({
+  def: {
+    name: 'add_geofence_place',
+    description:
+      'Save a new geofenced place (Home/Office/Gym/etc) so the phone can fire geo_enter / geo_exit events for it. Default radius is 25 m. Use when the user names a location during chat or after answering a proactive question.',
+    parameters: {
+      type: 'object',
+      properties: {
+        label: { type: 'string', description: 'Short name shown to the user (max 64 chars).' },
+        lat: { type: 'number' },
+        lng: { type: 'number' },
+        radius_m: {
+          type: 'integer',
+          minimum: 15,
+          maximum: 500,
+          description: 'Default 25; raise for large venues (gym, campus).',
+        },
+      },
+      required: ['label', 'lat', 'lng'],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const label = asString(args.label, 64);
+    const lat = Number(args.lat);
+    const lng = Number(args.lng);
+    if (!label) return { error: 'label required' };
+    if (!isFinite(lat) || !isFinite(lng)) return { error: 'lat/lng must be numbers' };
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return { error: 'lat/lng out of range' };
+    }
+    const radius = clampInt(args.radius_m, 15, 500, 25);
+    const { addPlace } = await import('../repos/places');
+    const row = await addPlace({ label, lat, lng, radiusM: radius });
+    return {
+      id: row.id,
+      label: row.label,
+      lat: row.lat,
+      lng: row.lng,
+      radius_m: row.radius_m,
+    };
+  },
+});
+
+add({
+  def: {
+    name: 'ask_user_question',
+    description:
+      "Queue a single short proactive question for the user. Use sparingly — only when answering would clearly improve future suggestions and you don't already know. Hard caps still apply (≤3/day, ≥120 min between, no pending). The question is shown both as an interactive notification AND as a card on the Today screen.",
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'One short sentence ≤ 18 words.' },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '2–4 short choices. For yes/no, use ["Yes","No"].',
+        },
+        expected_kind: { type: 'string', enum: ['yes_no', 'place_name', 'free_text'] },
+        trigger_kind: { type: 'string', enum: ['ad_hoc'], description: 'Always "ad_hoc" from chat.' },
+      },
+      required: ['prompt', 'options', 'expected_kind'],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const prompt = asString(args.prompt, 280);
+    if (!prompt) return { error: 'prompt required' };
+    const options = Array.isArray(args.options)
+      ? (args.options as unknown[])
+          .filter((x): x is string => typeof x === 'string')
+          .slice(0, 4)
+      : [];
+    if (options.length < 2) return { error: 'need ≥2 options' };
+    const ek = args.expected_kind;
+    if (ek !== 'yes_no' && ek !== 'place_name' && ek !== 'free_text') {
+      return { error: 'invalid expected_kind' };
+    }
+    return withDb(async (db) => {
+      const pending = await db.getFirstAsync<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM proactive_questions WHERE status='pending'`,
+      );
+      if ((pending?.n ?? 0) > 0) return { error: 'pending question exists' };
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      const today = await db.getFirstAsync<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM proactive_questions WHERE ts >= ?`,
+        [startOfDay.getTime()],
+      );
+      if ((today?.n ?? 0) >= 3) return { error: 'daily cap (3) reached' };
+
+      const id = crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+      const ts = Date.now();
+      await db.runAsync(
+        `INSERT INTO proactive_questions
+           (id, ts, trigger_kind, trigger_payload, prompt, options, expected_kind, status)
+         VALUES (?, ?, 'ad_hoc', '{}', ?, ?, ?, 'pending')`,
+        [id, ts, prompt, JSON.stringify(options), ek],
+      );
+      await db.runAsync(
+        `INSERT INTO events (ts, kind, payload) VALUES (?, 'ai_question', ?)`,
+        [ts, JSON.stringify({ question_id: id, trigger_kind: 'ad_hoc', prompt })],
+      );
+      try {
+        const { fireProactiveQuestionNotification } = await import('../rules/proactiveNotify');
+        const notifId = await fireProactiveQuestionNotification({
+          id,
+          prompt,
+          options,
+          expectedKind: ek,
+        });
+        if (notifId) {
+          await db.runAsync(
+            `UPDATE proactive_questions SET notification_id = ? WHERE id = ?`,
+            [notifId, id],
+          );
+        }
+      } catch (e) {
+        console.error(
+          '[ask_user_question] notify failed:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+      return { id, prompt, expected_kind: ek };
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'mark_pattern_memory',
+    description:
+      "Record an observation the user just confirmed in chat as a typed memory (pattern/habit/causal/prediction). The created memory is identical to one extracted nightly, just authored in real time. Tags should include weekday, hour, and place when applicable so RAG retrieval works later.",
+    parameters: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['pattern', 'causal', 'prediction', 'habit'] },
+        summary: { type: 'string' },
+        cause: { type: 'string' },
+        effect: { type: 'string' },
+        impact_score: { type: 'number', minimum: -1, maximum: 1 },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        tags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['type', 'summary', 'impact_score', 'confidence', 'tags'],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const summary = asString(args.summary, 1000);
+    if (!summary) return { error: 'summary required' };
+    const type = args.type as MemoryType;
+    if (!['pattern', 'causal', 'prediction', 'habit'].includes(type)) {
+      return { error: 'invalid type' };
+    }
+    const tags = Array.isArray(args.tags)
+      ? (args.tags as unknown[]).filter((t): t is string => typeof t === 'string').slice(0, 16)
+      : [];
+    const input: MemoryInput = {
+      type,
+      summary,
+      cause: asString(args.cause, 500) ?? undefined,
+      effect: asString(args.effect, 500) ?? undefined,
+      impact_score: clampNum(args.impact_score, -1, 1, 0),
+      confidence: clampNum(args.confidence, 0, 1, 0.6),
+      tags,
+      source_ref: 'chat',
+    };
+    const id = await createMemory(input);
+    if (!id) return { error: 'embedding failed (cost cap or no key)' };
+    return { id, type, summary };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// CHAT read-only inventories (v7+)
+// These are bounded list/range queries the chat LLM can use to answer
+// concrete factual questions ("how long was I in office today?",
+// "what time did I leave the gym last Tuesday?"). The system prompt tells
+// chat to PREFER these raw-event lookups over rollup summaries when the
+// user asks for precise timing.
+// ─────────────────────────────────────────────────────────────────────────
+
+add({
+  def: {
+    name: 'list_places',
+    description:
+      'List every geofenced place the user has saved (Home, Office, Gym, etc) with id/label/lat/lng/radius_m. Use for any query that mentions a named location so you can pair it with geo_enter / geo_exit events.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+  scopes: ['chat'],
+  handler: async () => {
+    const { listPlaces } = await import('../repos/places');
+    const rows = await listPlaces();
+    return rows.map((r) => ({
+      id: r.id,
+      label: r.label,
+      lat: r.lat,
+      lng: r.lng,
+      radius_m: r.radius_m,
+    }));
+  },
+});
+
+add({
+  def: {
+    name: 'list_todos',
+    description:
+      "List todos. Default: open + in-progress (not done/cancelled). Pass status='all' for everything, or 'done' for completed only.",
+    parameters: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['open', 'done', 'all'] },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      required: [],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const status = args.status === 'done' || args.status === 'all' ? args.status : 'open';
+    const limit = clampInt(args.limit, 1, 100, 50);
+    return withDb(async (db) => {
+      let where = '';
+      if (status === 'open') where = "WHERE status NOT IN ('done','cancelled')";
+      else if (status === 'done') where = "WHERE status = 'done'";
+      const rows = await db.getAllAsync<{
+        id: string; title: string; notes: string | null; due_ts: number | null;
+        priority: number; status: string; created_ts: number; done_ts: number | null;
+      }>(
+        `SELECT id, title, notes, due_ts, priority, status, created_ts, done_ts
+         FROM todos ${where} ORDER BY COALESCE(due_ts, created_ts) ASC LIMIT ?`,
+        [limit],
+      );
+      return rows;
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'list_recent_memories',
+    description:
+      'Newest-first chronological list of memories (no semantic search). Useful when the user asks "what have you noticed recently?" Pass `type` to filter (pattern/causal/prediction/habit). For semantic lookup, use search_memories instead.',
+    parameters: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['pattern', 'causal', 'prediction', 'habit'] },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      required: [],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const limit = clampInt(args.limit, 1, 50, 20);
+    const type = typeof args.type === 'string' ? args.type : null;
+    return withDb(async (db) => {
+      const rows = await db.getAllAsync<{
+        id: string; type: string; summary: string; cause: string | null; effect: string | null;
+        impact_score: number; confidence: number; occurrences: number;
+        tags: string; created_ts: number; was_correct: number | null;
+      }>(
+        `SELECT id, type, summary, cause, effect, impact_score, confidence, occurrences,
+                tags, created_ts, was_correct
+         FROM memories
+         WHERE archived_ts IS NULL ${type ? 'AND type = ?' : ''}
+         ORDER BY created_ts DESC LIMIT ?`,
+        type ? [type, limit] : [limit],
+      );
+      return rows.map((r) => ({
+        id: r.id,
+        type: r.type,
+        summary: r.summary,
+        cause: r.cause,
+        effect: r.effect,
+        impact_score: r.impact_score,
+        confidence: r.confidence,
+        occurrences: r.occurrences,
+        tags: safeJson(r.tags),
+        created_ts: r.created_ts,
+        was_correct: r.was_correct,
+      }));
+    });
+  },
+});
+
+add({
+  def: {
+    name: 'list_proactive_questions',
+    description:
+      "List the AI's own past proactive questions and how the user answered. Useful when the user says 'what did you ask me yesterday?' or you want to avoid asking the same thing twice in chat. Newest-first.",
+    parameters: {
+      type: 'object',
+      properties: {
+        status: {
+          type: 'string',
+          enum: ['pending', 'answered', 'dismissed', 'expired', 'all'],
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      required: [],
+    },
+  },
+  scopes: ['chat'],
+  handler: async (args) => {
+    const limit = clampInt(args.limit, 1, 50, 20);
+    const statuses = ['pending', 'answered', 'dismissed', 'expired'];
+    const status =
+      typeof args.status === 'string' && statuses.includes(args.status) ? args.status : 'all';
+    return withDb(async (db) => {
+      const where = status === 'all' ? '' : 'WHERE status = ?';
+      const params: (string | number)[] = status === 'all' ? [limit] : [status, limit];
+      const rows = await db.getAllAsync<{
+        id: string; ts: number; trigger_kind: string; prompt: string;
+        options: string; expected_kind: string; status: string;
+        answered_text: string | null; answered_ts: number | null;
+      }>(
+        `SELECT id, ts, trigger_kind, prompt, options, expected_kind, status,
+                answered_text, answered_ts
+         FROM proactive_questions ${where} ORDER BY ts DESC LIMIT ?`,
+        params,
+      );
+      return rows.map((r) => ({
+        id: r.id,
+        ts: r.ts,
+        trigger_kind: r.trigger_kind,
+        prompt: r.prompt,
+        options: safeJson(r.options),
+        expected_kind: r.expected_kind,
+        status: r.status,
+        answered_text: r.answered_text,
+        answered_ts: r.answered_ts,
+      }));
+    });
   },
 });
 

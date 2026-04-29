@@ -42,9 +42,27 @@ Rules:
 - When the user asks something concrete ("how much YouTube yesterday?", "did I sleep enough?"),
   call a tool first to get real numbers, then narrate the answer in plain language.
 - Never invent metrics. If the data isn't there, say so plainly.
-- Most tools are read-only views over the user's local data. A few write tools
-  (create_todo, propose_rule, mark_memory_archived) are available — use them
-  ONLY when the user explicitly asks you to record / schedule / discard.`;
+
+Tool selection priority for *precise timing / duration / location* questions
+("how long at office today?", "what time did I leave the gym?", "am I staying
+later this week than last?"):
+  1. PREFER raw events via get_events_window(start_ts, end_ts, kinds?, limit?).
+     They are the only source of exact timestamps. Compute today's window as
+     [00:00 local, 24h later] in epoch ms.
+  2. Use list_places to translate place ids in geo_enter / geo_exit events.
+  3. Compute durations yourself by pairing matching enter/exit events.
+  4. Use get_daily_rollup / count_events_by_app for AGGREGATE answers
+     ("how much YouTube yesterday?") — they're cheaper but less precise.
+  5. Use search_memories / list_recent_memories only when the user asks for
+     PATTERNS or insights, not for raw numbers.
+
+Read-only inventories: list_places, list_todos, list_recent_memories,
+list_proactive_questions, get_app_categories.
+
+A few write tools (create_todo, propose_rule, mark_memory_archived,
+add_geofence_place, mark_pattern_memory, ask_user_question) are available —
+use them ONLY when the user explicitly asks you to record / schedule / discard
+or when adding a place from a clear conversational signal.`;
 
 export async function runChatTurn(history: ChatTurn[]): Promise<ChatRunResult> {
   const startedAt = Date.now();
