@@ -1,16 +1,11 @@
 /**
- * Memory store: CRUD + scoring. Stage 12 scaffolding.
+ * Memory store: CRUD + scoring.
  *
- * Design invariants (enforced here, not by callers):
- *   - Every persisted memory has a non-empty embedding vector. If `embedText`
- *     returns null (cost-cap, no key, http error), `createMemory` returns null
- *     and writes nothing.
- *   - Soft-delete only. `archiveMemory` sets `archived_ts`; we never DELETE.
- *   - `last_accessed` is bumped whenever rag.ts retrieves a memory; that drives
- *     the recency component of the effective score.
- *
- * No LLM extraction here — that lands in Stage 13 (`memory/extract.ts`). This
- * file only owns persistence and the deterministic scoring formula.
+ * Invariants:
+ *   - Every persisted memory has an embedding vector. createMemory returns null if embedText
+ *     fails — never writes a row without an embedding.
+ *   - Soft-delete only. archiveMemory sets archived_ts; no DELETE.
+ *   - last_accessed is bumped by rag.ts on retrieval, driving the recency decay score.
  */
 import type * as SQLite from 'expo-sqlite';
 import { withDb } from '../db';
@@ -209,7 +204,7 @@ export async function archiveMemory(id: string): Promise<void> {
   });
 }
 
-/** Set the actual outcome for a stored prediction. Used by Stage-15 self-learning. */
+/** Set the actual outcome for a stored prediction. */  
 export async function recordPredictionOutcome(
   id: string,
   actualOutcome: string,
@@ -234,7 +229,7 @@ export async function recordPredictionOutcome(
  * penalty, and a recency decay that kicks in after 7 days of disuse.
  *
  * Returns a value in [-1, 1]. Used by rag.ts re-ranking and by
- * consolidation passes (Stage 16) to flag low-score memories for archival.
+ * maintenance sweep to flag low-score memories for archival.
  */
 export function computeEffectiveScore(m: Memory): number {
   const REINFORCE_WEIGHT = 0.3;

@@ -1,18 +1,16 @@
 /**
- * Silence classifier — converts gaps in the active-event stream into
+ * Silence classifier. Converts gaps in the active-event stream into
  * `inferred_activity` events the rest of the system can read.
  *
- * Runs from the aggregator worker (Stage 5) once per tick for `today` and
- * once for `yesterday` until yesterday is sealed. No new background job.
+ * Runs once per aggregator tick for today and yesterday.
+ * Heuristics:
+ *   - Gap ≥60 min, last+next at home, hours 21–07 → sleep_or_rest
+ *   - Gap ≥45 min, at office geofence, hours 09–18 → focused_work
+ *   - Gap inside a 'gym' geofence → workout
+ *   - Gap ≥60 min otherwise → unknown
  *
- * Heuristic (see docs gap analysis §UC2):
- *   - night silence (>=60 min, last+next at home, hours 21–07) -> sleep_or_rest
- *   - office-hours silence (>=45 min, location=office, hours 09–18) -> focused_work
- *   - silence inside a 'gym' geofence -> workout
- *   - else >=60 min daytime gap -> unknown (rule engine prompts the user)
- *
- * Idempotent: deletes prior auto-written rows for the day before re-inserting,
- * but preserves rows the user has confirmed (`user_confirmed: true`).
+ * Idempotent: deletes prior auto-written rows before re-inserting,
+ * preserving rows the user has confirmed (user_confirmed: true).
  */
 import type * as SQLite from 'expo-sqlite';
 import { localDayStartMs, localHour } from './time';

@@ -323,7 +323,7 @@ async function runMigrate(): Promise<number> {
     );
     await addColumnIfMissing(db, 'app_categories', 'last_categorized_ts', 'INTEGER');
     await addColumnIfMissing(db, 'app_categories', 'details', 'TEXT');
-    // v6 — rules columns for LLM-generated rules (Stage 14).
+    // Rules columns for LLM-generated rules.
     await addColumnIfMissing(db, 'rules', 'source', "TEXT NOT NULL DEFAULT 'user'");
     await addColumnIfMissing(db, 'rules', 'predicted_impact_score', 'REAL');
     await addColumnIfMissing(db, 'rules', 'based_on_memory_ids', 'TEXT');
@@ -336,8 +336,7 @@ async function runMigrate(): Promise<number> {
         [String(SCHEMA_VERSION)],
       );
     }
-    // Sweep junk app_fg rows on every boot. Cheap (single DELETE) and keeps
-    // the events table clean even before the Stage-5 aggregator lands.
+    // Sweep junk app_fg rows on every boot. Cheap (single DELETE).
     await purgeShortAppFg(db);
     return SCHEMA_VERSION;
   });
@@ -364,8 +363,7 @@ async function addColumnIfMissing(
  * These are sub-second RESUMED/PAUSED noise (sub-activity nav, share sheet
  * pop-ups) — useless for behavior modeling and waste storage.
  *
- * Called on every app boot AND will be called by the Stage-5 aggregator
- * before it builds rollups (so rollups never see this noise either).
+ * Called on every app boot and by the aggregator before building rollups.
  */
 export async function purgeShortAppFg(
   db: SQLite.SQLiteDatabase,

@@ -1,62 +1,21 @@
 /**
  * Phone-side SQLite schema (expo-sqlite). Single source of truth.
- *
- * v2 (2026-04-26): local-first migration. Adds behavior_profile, monthly_rollup,
- * llm_calls. Extends nudges_log with reasoning/level/llm_call_id. Drops the
- * sync-related index (the column stays, harmless). See docs/ARCHITECTURE.md §3.2.
- *
  * Schema bumps require uninstall+reinstall on the phone to wipe the old DB.
+ *
+ * Migrations are additive only via addColumnIfMissing. Never DROP or RENAME.
  */
 
 export const SCHEMA_VERSION = 7;
 
 /**
- * v7 (2026-04-30) — additive only. Proactive AI questions.
- *  - new table `proactive_questions`: rows the eligibility scanner + LLM
- *    create when the phone notices a possibly-meaningful pattern (long
- *    dwell at an unknown spot, no phone usage on a usually-active evening,
- *    weekend night dwell, etc). User answers via interactive notification
- *    or in-app card; the answer is materialised into a `memories` row and
- *    optionally a new `places` row.
- *  - new EventKind values: 'ai_question', 'ai_question_response'.
- *  - new LlmPurpose: 'proactive_question'.
- * No DROP, no RENAME.
- */
-
-/**
- * v6 (2026-04-29) — additive only. Stage 14 (LLM-generated rules).
- *  - rules.source                  TEXT  ('user' | 'seed' | 'llm') default 'user'
- *  - rules.predicted_impact_score  REAL  set by the nightly nudge pass
- *  - rules.based_on_memory_ids     TEXT  JSON array of memory.id
- *  - rules.disabled_reason         TEXT  free-form, set when LLM auto-disables
- *  - rules.last_refined_ts         INTEGER  epoch ms
- * Applied via `addColumnIfMissing`.
- */
-
-/**
- * v5 (2026-04-28) — additive only.
- *  - app_categories.subcategory          TEXT     (e.g. 'social_media', 'video_streaming')
- *  - app_categories.enriched             INTEGER  (0/1, 1 once LLM has filled metadata)
- *  - app_categories.last_categorized_ts  INTEGER  (when LLM last touched the row)
- *  - app_categories.details              TEXT     (JSON: publisher, description, official_site, ...)
- *  - app_categories.source 'discovered' is a new sentinel for pkgs auto-added
- *    by the aggregator when seen in events but not seeded.
- * Applied via `addColumnIfMissing`. No DROP, no RENAME.
- * v4 (2026-04-28) — additive only. Stage 12 (Intelligence Evolution).
- *  - new table `memories`: derived patterns/predictions with embeddings.
- *  - embedding column is JSON-encoded float[] (1536-dim, text-embedding-3-small).
- *  - soft-delete via archived_ts; never DELETE.
- * See docs/ARCHITECTURE.md §9 and docs/LIFEOS_ARCHITECTURE_EVOLUTION.md.
- *
- * v3 (2026-04-26) — additive only.
- *  - daily_rollup.productivity_score REAL  (deterministic SQL score, see brain/productivityScore.ts)
- *  - nudges_log.next_day_score    REAL    (productivity_score for the day after the nudge)
- *  - nudges_log.baseline_score    REAL    (median over preceding 7 days)
- *  - nudges_log.score_delta       REAL    (next_day - baseline)
- *  - new EventKind values: 'inferred_activity', 'user_clarification'
- *  - nudges_log.user_helpful  INTEGER  (1 = thumbs up, -1 = thumbs down, NULL = no manual feedback)
- * Applied by `migrate()` via PRAGMA table_info guarded ALTER TABLE.
- * No DROP, no RENAME — never.
+ * Current schema additions (v7, additive only):
+ *  - proactive_questions table
+ *  - EventKind: 'ai_question', 'ai_question_response'
+ *  - LlmPurpose: 'proactive_question'
+ *  - rules: source, predicted_impact_score, based_on_memory_ids, disabled_reason, last_refined_ts
+ *  - app_categories: subcategory, enriched, last_categorized_ts, details
+ *  - memories table (1536-dim embeddings, soft-delete via archived_ts)
+ *  - daily_rollup.productivity_score, nudges_log.next_day_score/baseline_score/score_delta/user_helpful
  */
 
 /** Ordered list of statements run on every app start (all idempotent). */
@@ -298,7 +257,7 @@ export interface DailyRollupRow {
   date: string;
   data: string;
   updated_ts: number;
-  /** v3. Deterministic SQL score in [0,1]. NULL until aggregator computes it. */
+  /** Deterministic SQL score in [0,1]. NULL until aggregator computes it. */
   productivity_score: number | null;
 }
 
@@ -336,13 +295,13 @@ export interface NudgeRow {
   level: 1 | 2 | 3;
   user_action: 'dismissed' | 'acted' | 'ignored' | null;
   acted_within_sec: number | null;
-  /** v3. productivity_score of the day AFTER ts (local). */
+  /** productivity_score of the day AFTER ts (local). */
   next_day_score: number | null;
-  /** v3. Median productivity_score over the 7 days preceding ts. */
+  /** Median productivity_score over the 7 days preceding ts. */
   baseline_score: number | null;
-  /** v3. next_day_score - baseline_score. */
+  /** next_day_score - baseline_score. */
   score_delta: number | null;
-  /** v3. Manual user feedback on whether a nudge was useful. 1 = up, -1 = down, null = unrated. Independent of LLM analysis. */
+  /** Manual user feedback. 1 = thumbs up, -1 = thumbs down, null = no feedback. */
   user_helpful: 1 | -1 | null;
 }
 

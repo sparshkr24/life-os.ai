@@ -61,8 +61,7 @@ export async function runAggregatorTick(): Promise<TickReport> {
       const scoreToday = await computeProductivityScore(db, today);
       const scoreYesterday = await computeProductivityScore(db, yesterday);
 
-      // Stage 14 prep: pure-RAG predictive insights for today. Throttled
-      // to once per ~90 min internally; safe to call every tick.
+      // Pure-RAG predictive insights for today. Throttled to once per ~90 min internally; safe to call every tick.
       try {
         const ins = await maybeRebuildPredictiveInsights(db, today);
         if (ins.ran) {
@@ -75,8 +74,8 @@ export async function runAggregatorTick(): Promise<TickReport> {
         );
       }
 
-      // v7: proactive AI questions. Cheap detectors gate the LLM call;
-      // hard-throttled (≥120 min between, ≤3/day, no pending row, …).
+      // Proactive AI questions. Cheap detectors gate the LLM call;
+      // hard-throttled (≥6h between, ≤3/day, no pending row).
       try {
         const expired = await expireOldProactiveQuestions(db, t0);
         if (expired > 0) console.log(`[aggregator] proactive expired=${expired}`);
@@ -100,13 +99,11 @@ export async function runAggregatorTick(): Promise<TickReport> {
       );
 
       // Background rule eval — fires nudges even when the app is killed.
-      // The 60s foreground loop covers active sessions. Stage 14 made the
-      // rules themselves LLM-curated nightly, so the old smart-nudge tick
-      // is gone — no per-tick LLM call here.
+      // The 60s foreground loop covers active sessions. Rules are LLM-curated
+      // nightly — no per-tick LLM call here.
       await runRulesOnceFromBackground();
 
-      // Stage 8: nightly profile rebuild watchdog. Runs Sonnet at most
-      // once per ~24h, only after 03:00 local. Cheap when not due.
+      // Nightly profile rebuild watchdog. Runs at most once per ~24h, only after 03:00 local.
       try {
         await maybeRunNightlyWatchdog();
       } catch (e) {

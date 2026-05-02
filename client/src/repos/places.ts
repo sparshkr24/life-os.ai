@@ -2,9 +2,9 @@
  * Places repository. Thin wrapper over the `places` table.
  *
  * Every mutation also re-registers the geofence list with the OS via the
- * Kotlin bridge — that's the only way the Stage-3c geofencing actually
- * starts firing. If the bridge isn't available (web / dev), the DB write
- * still happens; geofences just won't trigger.
+ * Kotlin bridge — that's the only way OS geofencing actually starts firing.
+ * If the bridge isn't available (web / dev), the DB write still happens;
+ * geofences just won't trigger.
  */
 import { Platform } from 'react-native';
 import { withDb } from '../db';

@@ -1,43 +1,33 @@
 # CLAUDE.md — `client/src/memory/`
 
-> **v3 Stage 13–16 module.** Memory store + RAG + self-learning maintenance. Read [docs/ARCHITECTURE.md §9](../../../docs/ARCHITECTURE.md) and [docs/LIFEOS_ARCHITECTURE_EVOLUTION.md](../../../docs/LIFEOS_ARCHITECTURE_EVOLUTION.md) before editing.
+## Responsibility
+
+Memory store, retrieval, and maintenance. This is what makes the app get smarter over time.
+
+The nightly brain extracts patterns from raw events and stores them here as structured memories with embeddings. Every future AI call (chat, profile rebuild, nudge generation) searches this store to retrieve only the most relevant context — rather than sending everything.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `embed.ts` | OpenAI `text-embedding-3-small` wrapper. Cost-cap-gated, key-checked, every call logged to `llm_calls` (purpose='embed'). Exports `embedText`, `cosineSim`, `EMBED_DIM=1536`, `EMBED_MODEL`. Returns `null` on failure — callers must skip the write, never persist a row without an embedding. |
-| `store.ts` | CRUD + scoring. `createMemory(MemoryInput)` embeds + inserts (or returns null). `listActiveMemories`, `getMemoryById`, `touchMemories`, `reinforceMemory` (Stage 15: also `confidence = MIN(0.99, confidence + 0.05)`), `contradictMemory` (Stage 15: also `confidence = MAX(0.05, confidence - 0.10)`), `archiveMemory`, `recordPredictionOutcome`, `getMemoryStats`. `computeEffectiveScore(Memory)` is the deterministic decay formula consumed by re-rankers. Hydration parses JSON `embedding`/`tags`/`child_ids`; rows with bad shape are skipped (logged). |
-| `rag.ts` | `retrieveContext(RagQuery) → RagResult`. Embeds the query text, scans `listActiveMemories()`, computes cosine, re-ranks by `0.5·sim + 0.2·recency + 0.15·|impact| + 0.15·confidence` (+ small tag-overlap bonus), bumps `last_accessed` on the top-k via `touchMemories`. Returns `{ embedded: false, memories: [] }` on embed failure so callers can fall back. |
-| `maintenance.ts` | **Stage 15/16.** `runMemoryMaintenance()` — deterministic SQL safety net called from `brain/nightly.ts:runMemoryPass` AFTER the LLM tool loop succeeds. Idempotent (every UPDATE includes `archived_ts IS NULL`). Soft-archives in 4 buckets: (1) failed predictions never reinforced (`was_correct=0 AND reinforcement=0`), (2) consistently disproven (`contradiction≥3 AND contradiction≥2·reinforcement`), (3) bottom-of-barrel confidence (`<0.10 AND reinforcement=0`), (4) consolidation children whose parent has been alive ≥14d. Returns `MaintenanceReport` with per-bucket counts; logged but not persisted. |
+| `embed.ts` | Wraps `runEmbedTask` from `llm/router.ts`. Returns `EmbedResult` or `null`. Exports `embedText`, `cosineSim`, `EMBED_DIM=1536`, `EMBED_MODEL`. Returns null on cap/no-key/failure — callers must skip the write. |
+| `store.ts` | CRUD + scoring. `createMemory(MemoryInput)` embeds + inserts atomically (returns null on embed failure — never persists without embedding). `listActiveMemories`, `getMemoryById`, `touchMemories` (bumps `last_accessed`), `reinforceMemory` (`confidence = MIN(0.99, confidence + 0.05)`), `contradictMemory` (`confidence = MAX(0.05, confidence − 0.10)`), `archiveMemory` (sets `archived_ts`), `recordPredictionOutcome`, `getMemoryStats`. `computeEffectiveScore(Memory)` = raw impact + reinforcement·0.3·impact − contradiction·0.5·sign(impact), with exponential recency decay after 7 days idle. Rows with bad embedding shape are silently skipped during hydration. |
+| `rag.ts` | `retrieveContext(RagQuery) → RagResult`. Embeds query, scans `listActiveMemories()`, re-ranks by `0.5·sim + 0.2·recency + 0.15·|impact| + 0.15·confidence` (+ small tag-overlap bonus), touches top-k. Per-decision-type k defaults: nightly=12, rule_generation=18, chat=6, prediction_update=6. Returns `{embedded:false, memories:[]}` on embed failure so callers fall back gracefully. Builds a markdown `contextBlock` ready to inject into any prompt. |
+| `maintenance.ts` | `runMemoryMaintenance() → MaintenanceReport` — deterministic SQL safety net. Called from `brain/nightly.ts` after the LLM tool loop. Idempotent (every UPDATE includes `archived_ts IS NULL`). Soft-archives 4 buckets: (1) failed predictions never reinforced, (2) consistently disproven (`contradiction≥3 AND contradiction≥2·reinforcement`), (3) confidence<0.10 with no reinforcement, (4) consolidation children whose parent is ≥14d old. Logs counts, does not persist the report. |
 
 ## Callers
 
-- `brain/nightly.ts:runMemoryPass` → loads raw events for yesterday + `priorProfile` + `unverifiedPredictions` + `shakyMemories` (contradiction≥1 OR confidence<0.4 with no reinforcement), prompts the LLM to call `create_memory`/`verify_memory`/`reinforce_memory`/`contradict_memory`/`consolidate_memories`/`mark_memory_archived`/`set_app_category` as needed, then calls `runMemoryMaintenance()` after the tool loop succeeds.
-- `brain/nightly.ts:runProfilePass` → reads top-25 active memories by `|impact|·confidence` to ground the profile rebuild. Read-only.
-- `brain/nightly.ts:runNudgePass` → reads top-30 actionable memories (causal/habit/prediction with `|impact|≥0.15` AND `confidence≥0.5`) to seed `create_rule` calls; passes their ids in `based_on_memory_ids`.
-- `brain/chat.ts` → `retrieveContext({decisionType:'chat', queryText: lastUserMessage, k:6})` and appends `contextBlock` to the chat system prompt. Embed failure / empty store → bare prompt.
-- `brain/predictiveInsights.ts` → `retrieveContext({decisionType:'prediction_update', queryText: today_summary, k:5})` for the Today rollup tile.
+- `brain/nightly.ts:runMemoryPass` → loads raw events + prior profile + shaky memories, prompts LLM to call memory tools, then calls `runMemoryMaintenance()`.
+- `brain/nightly.ts:runProfilePass` → reads top-25 active memories by `|impact|·confidence` to ground profile rebuild. Read-only.
+- `brain/nightly.ts:runNudgePass` → reads top-30 actionable memories (causal/habit/prediction with `|impact|≥0.15` AND `confidence≥0.5`) to seed rule creation.
+- `brain/chat.ts` → `retrieveContext({decisionType:'chat', queryText: lastUserMessage, k:6})` — appends `contextBlock` to the system prompt.
+- `brain/predictiveInsights.ts` → `retrieveContext({decisionType:'prediction_update', k:5})` for the rollup predictive tile.
 
-## Hard rules (in addition to the root list)
+## Hard rules
 
-1. **Never persist a memory without an embedding.** `createMemory` enforces this. If `embedText` returns null, return null — do not insert a row with an empty/zero vector.
-2. **Soft-delete only.** Use `archiveMemory` (sets `archived_ts`). No `DELETE FROM memories` anywhere in this folder or its callers.
-3. **Embedding model is pinned to `text-embedding-3-small` (1536-dim).** Each row stores `embed_model` so a future swap is a re-embed migration, not a schema bump. `EMBED_DIM` must equal the dim of every row read by `rag.ts`; `hydrate()` filters bad-shape rows.
-4. **No raw events through this module.** Memories are derived from rollups + verified facts. Stage 13 (`extract.ts`) will read `daily_rollup`, never `events`.
-5. **Cost cap is the hard wall.** `embedText` checks `sumTodayLlmCostUsd` first; do not bypass.
-6. **No new deps for in-process math.** Cosine similarity is a 5-line loop. If row count crosses ~5 K and the scan exceeds ~50 ms, revisit (Annoy via JSI, or `sqlite-vss` if it ever ships RN-compatible). Until then, stay simple.
-
-## Stage progression
-
-- **Stage 12:** scaffolding (embed/store/rag).
-- **Stage 13:** RAG wired into `brain/nightly.ts` + `brain/chat.ts`. Falls back to v2 path on RAG miss.
-- **Stage 14:** Multi-provider LLM router; LLM-curated rules (`source='llm'`) generated by nightly Pass 3, replacing the smart-nudge tick.
-- **Stage 15 (now):** confidence auto-updates on reinforce/contradict; `maintenance.ts` adds the deterministic post-pass sweep that closes the feedback loop.
-- **Stage 16 (now):** `consolidate_memories` (LLM tool, scope `nightly_memory`) creates abstract `pattern`-typed parents; `maintenance.ts` archives consolidation children once parent has been alive ≥14d.
-- **Stage 17:** add 5-min RAG cache, batch embedding while charging, empty-store fallback in callers.
-
-## Folder layout invariants
-
-- One file per concern. Don't bundle extract / consolidate into store.
-- No React, no UI, no notifications. This folder is pure data + math.
+1. **Never persist a memory without an embedding.** `createMemory` enforces this — if `embedText` returns null, the function returns null.
+2. **Soft-delete only.** Use `archiveMemory`. No `DELETE FROM memories` anywhere.
+3. **Embedding model is pinned to `text-embedding-3-small` (1536-dim).** Switching requires a re-embed migration across all existing rows.
+4. **No raw events through this module.** Memories are derived from rollups + the nightly pass output.
+5. **Cost cap is the hard wall.** `embedText` checks `sumTodayLlmCostUsd` first.
+6. **No new deps for in-process math.** Cosine similarity is a 5-line loop. Revisit only if active memory count crosses ~5K and scan time exceeds ~50ms.

@@ -1,34 +1,16 @@
 /**
- * Nightly two-pass tool-calling session (v3 Phase E, raw-events-aware).
+ * Nightly AI brain. Runs once per night around 03:05 local (watchdog in aggregator/index.ts).
  *
- * Watchdog fires once per night around 03:05 local. We split the work into
- * two separate model runs:
+ * Three sequential passes, each its own tool-calling loop:
+ *   Pass 1 — runMemoryPass: reads full raw event log for yesterday, extracts/verifies/
+ *             reinforces/contradicts memories, enriches app_categories.
+ *   Pass 2 — runProfilePass: read-only. Rebuilds behavior_profile JSON from rollups +
+ *             verified facts + top memories.
+ *   Pass 3 — runNudgePass: refines AI-generated rules based on effectiveness + memories.
  *
- *   Pass 1  — runMemoryPass(yesterday)
- *     Goal: build the most accurate possible mental model of yesterday from
- *     primary evidence (raw events with `_ctx` ambient blocks) and reconcile
- *     it with the existing memory store.
- *     Tool scope: 'nightly_memory' (read tools + memory mutation tools +
- *     set_app_category). Side effects ARE the output — no JSON parsing.
- *
- *   Pass 2  — runProfilePass(yesterday)
- *     Goal: rebuild behavior_profile.data from rollups + verifiedFacts +
- *     a digest of the (now-refreshed) memory store. Read-only tools only.
- *     Output: the new behavior_profile JSON (assistant's last message).
- *
- * Splitting the passes is intentional (see ARCHITECTURE.md §7.3):
- *   - Different context size: memory pass eats 50–200k tok of raw events;
- *     profile pass stays under 20k.
- *   - Failure isolation: a malformed profile JSON cannot lose the memories
- *     the memory pass already saved.
- *   - Different temperature needs (memory = interpretive; profile = deterministic).
- *
- * Hard invariants (CLAUDE.md §7, §11–§12):
- *   - Raw events go to runMemoryPass ONLY. Every other call sees rollups +
- *     memory context.
- *   - Memory mutation is restricted to feedback columns. summary/cause/
- *     effect/embedding are immutable after createMemory.
- *   - Original event payload/ts/kind are immutable forever.
+ * Raw events go to Pass 1 ONLY. All other passes see derived data (rollups + memories).
+ * Memory semantic content (summary/cause/effect/embedding) is immutable after creation.
+ * Original event payload/ts/kind are immutable forever.
  */
 import { withDb } from '../db';
 import { buildVerifiedFacts } from './verifiedFacts';
@@ -252,8 +234,8 @@ async function runMemoryPass(yesterday: string): Promise<PassReport> {
     if (finalText !== null) {
       report.ok = true;
       console.log(`[nightly:memory] ${finalText.slice(0, 240)}`);
-      // Stage 15/16: deterministic sweep that closes the feedback loop after
-      // the LLM has done its interpretive work. Pure SQL — never throws cost.
+      // Deterministic sweep that archives bad memories after the LLM tool loop.
+      // Pure SQL — never throws cost.
       try {
         const sweep = await runMemoryMaintenance();
         console.log(
@@ -538,7 +520,7 @@ function buildProfileUserPrompt(yesterday: string, input: ProfilePassInputs): st
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Pass 3 — nudge rules (Stage 14)
+// Pass 3 — nudge rules
 // ────────────────────────────────────────────────────────────────────────────
 
 const NUDGE_SYSTEM_PROMPT = `You are the on-device nudge-rule curator for a single-user life-OS. You run AFTER the memory pass and the profile pass. Your job is to keep the user's nudge rules sharp and personalised: create new ones grounded in causal memories, refine existing LLM-generated rules based on observed effectiveness, and disable ones that are demonstrably annoying or net-negative.

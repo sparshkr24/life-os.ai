@@ -1,301 +1,483 @@
 # AI Life OS — Architecture
 
-> One user. One phone. One developer. No server. No cloud DB.
-> Everything in this document describes the **current** implementation. Per-folder details live in `CLAUDE.md` files; this doc is the system-level map.
+> One user. One phone. No server. No cloud.
+> Everything lives on the device. The only outbound network calls are HTTPS to the LLM API you configure.
 
 ---
 
-## Version preamble (history in 6 lines)
+## What This App Actually Does
 
-- **v1** (cut) — Express + Postgres backend, phone as a thin client. Deleted 2026-04-26.
-- **v2** — Local-first foundation: Kotlin foreground service + `expo-sqlite` + 15-min aggregator + nightly Sonnet profile rebuild + smart-nudge tick + tool-calling chat.
-- **v3** — Intelligence evolution: derived **memory store** with embeddings + RAG, single-session tool-calling **nightly** that extracts/verifies/consolidates memories and enriches app categories in one pass, multi-provider LLM router collapsed to **OpenAI + OpenRouter** only, ambient phone-state stamped onto every event payload at write time.
+Most phone tracking apps show you *what* you did. This app figures out *why*.
 
-The shipped system is v3. v2 is the substrate underneath.
+**The core insight:** Your phone has been silently recording a detailed log of your behavior for years. Every app you open, when you sleep, where you go, how active you are. That raw signal contains the answers to the questions you can't figure out on your own — why you keep getting distracted, why some days are great and others are a write-off, what actually triggers your bad habits.
 
----
+AI Life OS reads that signal, extracts the causal patterns, and tells you what's actually happening — privately, on your phone, with no data ever leaving your device.
 
-## 1. TL;DR
-
-- **No backend.** The phone is the entire system. Only outbound network calls are HTTPS to the LLM provider you configured (OpenAI direct, or OpenRouter).
-- **Local SQLite** (`expo-sqlite`, WAL on, schema v5) is the source of truth at `<filesDir>/SQLite/lifeos.db`.
-- **Kotlin foreground service** writes raw events; every payload gets stamped with the current ambient `_ctx` (place, battery, charging, network, audio) at insert time.
-- **Aggregator** (`expo-background-fetch`, every 15 min) maintains `daily_rollup` + `monthly_rollup` + `productivity_score` deterministically.
-- **Rule engine** (in-process, every 60 s) handles deterministic nudges offline.
-- **LLM brain** runs on-device through outbound API calls:
-  - **Nightly** (~03:05 local) — one tool-calling session: extract memories → verify yesterday's predictions → reinforce/contradict → consolidate → enrich `app_categories` → emit final `behavior_profile` JSON.
-  - **Chat** — on-demand, tool-calling against local SQLite (read-only views + a few user-confirmed writes).
-  - **Smart-nudge tick** — Stage 7 v2 path; intended to be retired once Stage 14 LLM-generated rules ship.
-- **Multi-provider LLM** through one router. Today: **OpenAI** (chat + embeddings) and **OpenRouter** (chat). Adding a third provider = one file in `client/src/llm/providers/` + one row in `MODELS`.
-- **API keys** entered in app Settings, persisted via `expo-secure-store`. Editable.
-- **Hard daily LLM cost cap**: $0.30, enforced before every call. Tracked in `llm_calls`.
-- **Notifications** — local only (`expo-notifications`). No FCM.
-- **Backups** — weekly DB export to `Documents/lifeos-backup-YYYYMMDD.db` (Stage 10).
+**The goal:** Automatic, causal, private behavioral understanding.
 
 ---
 
-## 2. Diagram
+## Two Real Examples
+
+### Example 1 — "Why can't I sleep before 2am?"
+
+Without this app, you'd blame stress, caffeine, or bad habits in general. With it:
+
+1. The app watches your phone for 2 weeks.
+2. The nightly AI pass reads your raw event log and spots: every time you hit a hard task (long coding or writing session), you open Instagram within 8 minutes. This happens at 10pm, 11pm, 12am — it keeps pushing your sleep back.
+3. It creates a memory: *"Avoidance loop — hard task → Instagram → sleep delay (avg 90 min). Confidence 0.81, seen 11 times."*
+4. The next night, when you open Instagram at 10:47pm, the rule engine fires: *"You're in the avoidance loop again. The task is still there — Instagram won't make it easier."*
+
+That's not a screen time alert. That's a diagnosis.
+
+### Example 2 — "Why was Tuesday so productive?"
+
+You had a 94/100 day last Tuesday. You have no idea why — you just felt good.
+
+You open Chat and ask: *"Why was Tuesday so good?"*
+
+The AI looks up Tuesday's rollup, pulls 3 relevant memories about your productive patterns, and tells you: *"You woke at 7:12am (your earliest in 2 weeks), didn't pick up your phone for 47 minutes after waking, and your first app was Notion. On your 8 best days, that 'no phone first thing' pattern appears every time."*
+
+Now you know what to replicate.
+
+---
+
+## System Overview
 
 ```
-┌──────────────────────── PHONE (sideloaded APK) ──────────────────────────┐
-│                                                                          │
-│  React Native UI (TypeScript, strict)                                    │
-│   ├─ Today  ├─ Observe (Events / Rollups / LLM / Nudges)                 │
-│   ├─ Chat   └─ Settings ─► Profile / AI Models / Permissions             │
-│                                                                          │
-│            writes ▲              reads ▼                                 │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  SQLite (lifeos.db, WAL, schema v5)                                │  │
-│  │  events · daily_rollup · monthly_rollup · behavior_profile         │  │
-│  │  memories · todos · rules · nudges_log · llm_calls                 │  │
-│  │  places · app_categories · schema_meta                             │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-│            ▲                       ▲                  ▲                  │
-│  Kotlin FG service        Aggregator (15 min)        Brain (TS)          │
-│  ─────────────────        ───────────────────        ───────────         │
-│   PhoneState (ambient)    purgeShortAppFg            llm/router          │
-│    └─ stamps every        classifySilences           memory/embed        │
-│       payload's _ctx      rebuild daily_rollup       memory/store        │
-│   UsageStatsPoller        productivityScore          memory/rag          │
-│   SleepApi / AR           monthly fold (1×/day)      brain/tools         │
-│   GeofenceReceiver        nightly watchdog ───┐      brain/chat          │
-│   NotificationListener                        │      brain/nightly       │
-│   Health Connect (5 min)                      ▼                          │
-│                                AlarmManager 03:05 ─► nightly tool session│
-│                                                     ─► behavior_profile  │
-└──────────────────────────────────────────────────────────────────────────┘
-                                                          │
-                                                          ▼
-                                          OpenAI / OpenRouter (HTTPS)
+┌─────────────────────────────── YOUR PHONE ────────────────────────────────┐
+│                                                                            │
+│  UI (React Native)                                                         │
+│  Today  │  Observe  │  Chat  │  Settings                                  │
+│                                                                            │
+│                         reads ▼                                            │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  SQLite  (lifeos.db)                                                 │  │
+│  │  events · daily_rollup · memories · behavior_profile · rules        │  │
+│  │  nudges_log · llm_calls · places · app_categories · schema_meta     │  │
+│  └────────────────┬──────────────────────┬────────────────────────┬────┘  │
+│                   │                      │                        │        │
+│  Kotlin service   │    15-min aggregator │           Nightly AI   │        │
+│  (24/7 collector) │    (pure SQL, no AI) │           (~3am)       │        │
+│  ───────────────  │    ────────────────  │           ─────────    │        │
+│  app usage        │    clean events      │           Pass 1:      │        │
+│  sleep            │    classify silences │           raw events → │        │
+│  activity         │    rebuild rollup    │           memories     │        │
+│  location         │    score day         │                        │        │
+│  steps / HR       │    run rule engine   │           Pass 2:      │        │
+│  + stamps every   │    check nightly     │           memories +   │        │
+│    event with     │    watchdog          │           rollups →    │        │
+│    context (_ctx) │                      │           profile      │        │
+│                   │                      │                        │        │
+│                   │                      │           Pass 3:      │        │
+│                   │                      │           memories +   │        │
+│                   │                      │           profile →    │        │
+│                   │                      │           AI rules     │        │
+└───────────────────┴──────────────────────┴────────────────────────┴────────┘
+                                                              │
+                                                              ▼ HTTPS
+                                                   OpenAI / Anthropic / etc.
 ```
 
 ---
 
-## 3. Tech stack
+## The Data Layer
 
-- React Native (Expo bare) + TypeScript strict
-- Kotlin (single bridge module — OS APIs only, no business logic)
-- `expo-sqlite` (WAL on)
-- `expo-secure-store` for API keys + cost cap
-- `expo-notifications` (local only)
-- `expo-task-manager` + `expo-background-fetch` for the 15-min worker
-- `AlarmManager` (Kotlin) for the 03:05 nightly kick
-- LLM: direct HTTPS via `fetch` — no SDKs. Two providers configured (`openai`, `openrouter`).
+### Tables
 
----
-
-## 4. Data layer
-
-### 4.1 Schema (v5)
-
-Defined in [client/src/db/schema.ts](../client/src/db/schema.ts). Migrations are **additive only** through `addColumnIfMissing`. Never DROP / RENAME.
-
-Tables:
-
-| Table | Role |
+| Table | What it stores |
 |---|---|
-| `events` | Raw events from collectors. `(ts, kind, source, payload)`. Payload is JSON; the Kotlin writer stamps an ambient `_ctx` block (`place_id`, `batt`, `charging`, `net`, `audio`) onto it at insert time. NotificationListener writes one row per ongoing notification (with `end_ts`/`duration_ms` filled in on removal) and dedupes transient notifications by `pkg|category` within 30 s. |
-| `daily_rollup` | One row per local date. JSON `data` blob plus first-class `productivity_score`. |
-| `monthly_rollup` | One row per month. Folded once per day from daily rollups. |
-| `behavior_profile` | Single row (`id=1`). v3 JSON (causal_chains, day_attribution, rule_suggestions, silence_priors, silence_correlations). Rebuilt nightly. |
-| `memories` | v3 derived store. `(id, type, summary, cause, effect, impact_score, confidence, occurrences, embedding TEXT, tags, predicted_outcome, actual_outcome, was_correct, parent_id, child_ids, archived_ts, ...)`. Embeddings = JSON-encoded `number[]` (1536-dim, `text-embedding-3-small`). Soft-delete via `archived_ts`. |
-| `todos` | User todos. Created via the chat `create_todo` tool or manually. |
-| `rules` | Deterministic nudge rules. Stage 14 will populate this from the LLM weekly. |
-| `nudges_log` | Every nudge that fired, plus `score_delta` (LLM-computed effectiveness) and `user_helpful` (manual ▲/▼ feedback). |
-| `llm_calls` | One row per LLM call. Cost cap enforcement reads `SUM(cost_usd)` for today. |
-| `places` | User-named geofences. |
-| `app_categories` | `(pkg, category, subcategory, source, enriched, last_categorized_ts, details)`. New pkgs auto-inserted as `('neutral','discovered',0)` by the aggregator; the nightly LLM enriches them via `set_app_category`. |
-| `schema_meta` | KV store: `last_nightly_ts`, `task_assignments` JSON, etc. |
+| `events` | Immutable raw stream. Every app open, sleep segment, step burst, location enter/exit. Each payload is stamped with ambient context at write-time (place, battery %, charging, network, audio). |
+| `daily_rollup` | Pre-computed summary per day. Top apps, sleep time, steps, places visited, productivity score. Rebuilt every 15 minutes. |
+| `monthly_rollup` | Rolled-up monthly view. Folded from daily rows once per day. |
+| `behavior_profile` | One JSON blob. The AI's current model of who you are — causal chains, habit loops, silence patterns, rule suggestions. Rebuilt nightly. |
+| `memories` | AI-extracted patterns with embeddings for search. Immutable semantic content; only feedback columns (confidence, reinforcement, contradiction) mutate. |
+| `rules` | If/then nudge rules. Seed rules + AI-generated rules from the nightly pass. |
+| `nudges_log` | Every nudge fired + your thumbs up/down rating + automated score delta. |
+| `llm_calls` | One row per AI call. Cost cap reads `SUM(cost_usd)` from here. |
+| `places` | Your named geofenced locations (home, gym, office, etc.). |
+| `app_categories` | Per-package category labels. The AI enriches these nightly from observed usage. |
+| `proactive_questions` | Questions the AI asked you proactively + your answers. |
+| `schema_meta` | Key-value store for system state (last nightly run, task model assignments, etc.). |
 
-### 4.2 Invariants
+### Invariants
 
-- Truth lives in `events` + `daily_rollup` (+ `verifiedFacts` derived from them). `memories`, `behavior_profile`, and the LLM tool surface are all **derived** and rebuildable.
-- Original event metadata (`ts`, `kind`, `payload`) is **immutable** — no code path mutates it.
-- Memory semantic content (`summary`, `cause`, `effect`, `embedding`, `created_ts`, `rollup_date`) is **immutable** after `createMemory`. Only feedback columns mutate.
-- Soft-delete only on memories.
-
----
-
-## 5. Native (Kotlin)
-
-Files in `client/android/app/src/main/java/com/lifeos/` — see [client/android/app/src/main/java/com/lifeos/CLAUDE.md](../client/android/app/src/main/java/com/lifeos/CLAUDE.md) for per-file details.
-
-- **`LifeOsForegroundService`** — long-running FG service; calls `PhoneState.init(this)` first, then drives every collector.
-- **`PhoneState`** — singleton holding ambient `placeId`, `batteryPct`, `isCharging`, `networkType`. Updated by passive listeners (BatteryReceiver, ConnectivityManager.NetworkCallback) and `GeofenceReceiver`. **Never** issues fresh GPS or expensive queries. `stamp(payloadJson)` merges a `_ctx` block into the payload string before insert. Idempotent.
-- **`EventDb`** — three insert/update entry points; every one runs payload through `PhoneState.stamp(...)`.
-- **Collectors** — `UsageStatsPoller`, `SleepReceiver`, `ActivityRecognitionReceiver`, `GeofenceReceiver`, `LifeOsNotificationListener`, `HealthConnectPoller`. Each writes to `events` via `EventDb`.
-- **`LifeOsBoot`** — re-arms the FG service on `BOOT_COMPLETED`.
-- **`LifeOsBridge`** — only TS-callable surface (start service, query permissions, set geofences, etc.).
-
-Schema is JS-owned. Kotlin only does INSERT/SELECT against columns declared in `schema.ts`.
+- `events` is immutable. No code path rewrites `ts`, `kind`, or the original `payload` fields.
+- `memories` semantic content (`summary`, `cause`, `effect`, `embedding`) is immutable after creation. Only feedback columns change, or the row is soft-archived.
+- Everything is soft-deleted. No `DELETE FROM` anywhere for data rows.
+- Truth is always `events` + `daily_rollup`. Everything else (memories, profile, rules) is derived and rebuildable.
 
 ---
 
-## 6. Aggregator (15 min)
+## The 4 Runtime Loops
 
-[client/src/aggregator/](../client/src/aggregator/) — see its CLAUDE.md.
+### Loop 1 — Kotlin Foreground Service (always running)
 
-Each tick (in order):
+A sticky Android service that survives reboots. Collects:
 
-1. `purgeShortAppFg` — drop sub-threshold `app_fg` events.
-2. `classifySilences` — write `inferred_activity` events for long quiet periods.
-3. Rebuild today's `daily_rollup`. (`aggApps` `INSERT OR IGNORE`s every observed pkg into `app_categories` so the nightly LLM has a backlog to enrich.)
-4. Recompute `productivity_score` for today.
-5. Once-per-day: monthly fold + nightly watchdog (fires `runNightlyRebuild` if local hour ≥ 3 and >20h since last success).
+| Collector | What it writes |
+|---|---|
+| UsageStats poller (60s) | `app_fg` — which app is in the foreground, for how long. Deduplicates session fragments. |
+| ActivityRecognition | `activity` — walking, running, in vehicle, still. |
+| Sleep API | `sleep` — sleep segments + classification confidence. |
+| GeofenceReceiver | `geo_enter` / `geo_exit` — when you enter/leave a named place. |
+| Health Connect (5 min) | `steps`, `heart_rate` — from wearables or phone sensors. |
+| StepCounter fallback | `steps` — hardware sensor when Health Connect unavailable. |
 
-All deterministic SQL. No LLM.
+Every single event gets a `_ctx` block stamped onto its payload at write-time: current place, battery %, charging, network type. This means every memory the AI extracts will know exactly what was happening around you.
+
+### Loop 2 — 15-Minute Aggregator (background, no AI)
+
+Runs every 15 minutes whether the app is open or not. Pure deterministic SQL — zero AI calls.
+
+```
+1. Clean noisy events
+   (remove launchers, system UI, sub-1-second app flickers, merge 90-second gaps)
+
+2. Classify silences
+   (gap ≥ 60 min with no active events → label as sleep / focused / workout / unknown)
+
+3. Rebuild today's daily_rollup
+   (total app time by category, sleep segment, place hours, first pickup, transitions)
+
+4. Compute productivity score (0–100)
+   (sleep 30% + focus 25% + wake time 15% + movement 15% + nudge response 15%)
+
+5. Once per day: fold monthly rollup
+
+6. Run rule engine (check all enabled rules → fire notifications if triggered)
+
+7. Check nightly watchdog (if after 3am and >20h since last run → kick nightly AI)
+```
+
+### Loop 3 — Rule Engine (every 60 seconds, fully offline)
+
+Checks every enabled rule against current state. Fires a local notification if triggered. No internet needed.
+
+Rules have 3 trigger shapes:
+- `{ app, after_local, threshold_min_today }` — "You've used Instagram for 60+ min and it's after 10pm"
+- `{ after_event: 'wake', within_sec, app_any }` — "You opened YouTube within 5 min of waking up"
+- `{ between_local, category, threshold_min, location }` — "You're at the gym but have under 20 min of exercise"
+
+Seed rules are hand-authored. AI-generated rules are created by the nightly Pass 3 and slot right into the same engine.
+
+### Loop 4 — Nightly AI Brain (~3am, three sequential passes)
+
+The expensive part. Runs once per day. Three AI sessions in sequence, each with its own tool-calling loop.
+
+```
+PRE-PASS (no tokens):
+  Finalize yesterday's productivity score
+  Compute nudge effectiveness for past 7 days
+
+PASS 1 — Memory Pass  (up to 8 tool loops)
+  Input:  Yesterday's full raw event log (up to 2,000 events with _ctx)
+          + yesterday's daily_rollup
+          + prior behavior_profile
+          + unverified predictions + shaky memories (low confidence or contradicted)
+  
+  AI calls tools to:
+    create_memory       → extract new patterns from yesterday
+    verify_memory       → check predictions that targeted yesterday
+    reinforce_memory    → confirm patterns the day validates
+    contradict_memory   → lower confidence on patterns the day disproves
+    consolidate_memories → merge 3+ similar specifics into an abstract parent
+    set_app_category    → enrich unenriched app packages
+
+  Output: Updated memories table. No JSON parsing — side effects are the output.
+
+PASS 2 — Profile Pass  (up to 4 tool loops, read-only)
+  Input:  Last 30 daily_rollups + last 3 monthly_rollups
+          + top 25 memories by (|impact| × confidence)
+          + verified facts (SQL-derived correlations)
+  
+  Output: New behavior_profile JSON → validated → saved to DB
+
+PASS 3 — Nudge Pass  (up to 6 tool loops)
+  Input:  Just-built profile + all AI-generated rules
+          + top 30 actionable memories (high impact, high confidence)
+          + 14-day nudge log (fired / acted / helpful / annoying)
+  
+  AI calls tools to:
+    get_rule_effectiveness → evaluate how each AI rule has been performing
+    update_rule / disable_rule → refine or kill underperforming rules
+    create_rule → write ≤4 new rules grounded in memories
+
+  Output: Updated rules table.
+
+After all passes: runMemoryMaintenance()
+  Pure SQL safety sweep — archives failed predictions, consistently wrong memories,
+  bottom-confidence rows, and consolidation children whose parent has survived 14 days.
+```
+
+**Hard rule:** Raw events go to Pass 1 only. Chat, the profile pass, and the nudge pass all see only derived data (rollups + memories). This keeps costs low and prevents noise from contaminating higher-level reasoning.
+
+**Cost envelope:**
+
+| Day (event volume) | Typical total cost |
+|---|---|
+| Light (~600 events) | ~$0.05 |
+| Normal (~1,200 events) | ~$0.09 |
+| Heavy (~2,500 events, cap) | ~$0.21 |
+
+Hard daily cap: $0.30. Enforced before every single AI call.
 
 ---
 
-## 7. Brain (LLM)
+## The Memory System
 
-[client/src/brain/](../client/src/brain/) — see CLAUDE.md.
+The memory system is what makes the app get smarter over time instead of just replaying data.
 
-### 7.1 Tool surface — `brain/tools.ts`
+### How a memory is born
 
-Single registry. Every LLM-callable tool is declared once with a `scopes` field listing which call(s) may use it. `getToolsForScope(scope)` returns `{defs, run(name, args)}`.
+```
+Pass 1 reads yesterday's raw events
+      ↓
+AI calls create_memory({
+  type: 'causal',
+  summary: 'Late chess games push sleep past 2am',
+  cause: 'Chess session ending after 11pm',
+  effect: 'Sleep onset > 2am, next-day score < 55',
+  impact_score: -0.7,
+  confidence: 0.5,
+  tags: ['chess', 'sleep', 'late-night']
+})
+      ↓
+embedText() converts text to 1536 numbers
+      ↓
+Row saved to memories table
+```
 
-Three scopes: `chat`, `nightly_memory`, `nightly_profile`.
+### How memories get smarter (or die)
 
-| Scope | Read tools | Write tools |
+| What happens | Effect |
+|---|---|
+| Pattern repeats on another day | `reinforce_memory` → confidence +0.05 (cap 0.99) |
+| Pattern disproved by a day's evidence | `contradict_memory` → confidence -0.10 (floor 0.05) |
+| Confidence < 0.10, never reinforced | Auto-archived by maintenance sweep |
+| 3+ contradictions and only 1 reinforcement | Auto-archived |
+| 3+ similar specific memories accumulate | Consolidated into abstract parent memory |
+| Parent alive ≥ 14 days | Children auto-archived |
+
+### How memories are retrieved (RAG)
+
+When the AI needs context for chat, profile rebuild, or nudge generation — it doesn't read every memory. It searches:
+
+```
+Query text (e.g. "what happens when I stay up late")
+      ↓
+Embed query → 1536-number vector
+      ↓
+Compare against every active memory's vector (cosine similarity)
+      ↓
+Re-rank by:
+  50% × similarity score
+  20% × recency (how recently accessed)
+  15% × |impact score|
+  15% × confidence
+      ↓
+Return top-k as markdown → inject into AI prompt
+```
+
+In-process cosine scan. No vector database needed. Performant up to ~5,000 memories.
+
+---
+
+## The LLM Router
+
+All AI calls go through `llm/router.ts`. Never directly to `fetch`.
+
+```
+runChatTask(taskKind, request)
+      ↓
+resolve which model handles this task (user assignment → default fallback)
+      ↓
+check daily cost cap ($0.30 hard wall)
+      ↓
+get provider API key
+      ↓
+call provider adapter (OpenAI / Anthropic / MiniMax / DeepSeek)
+      ↓
+log to llm_calls
+      ↓
+return { kind: 'ok' | 'skipped' | 'failed', response }
+```
+
+Never throws. Callers always get a discriminated union back and handle all three outcomes.
+
+**Supported providers:**
+
+| Provider | Chat | Embeddings |
 |---|---|---|
-| `chat` | get_today_summary, get_daily_rollup, get_recent_rollups, get_monthly_rollup, get_profile, get_recent_nudges, search_memories, get_memory, get_events_window, count_events_by_app, get_app_categories | create_todo, update_todo, propose_rule (`enabled=0`), mark_memory_archived |
-| `nightly_memory` | (all chat reads) | create_memory, verify_memory, reinforce_memory, contradict_memory, mark_memory_archived, consolidate_memories, set_app_category |
-| `nightly_profile` | (all chat reads) | *(none — read-only pass that emits the final profile JSON)* |
+| OpenAI | ✅ | ✅ (text-embedding-3-small) |
+| Anthropic | ✅ | ❌ |
+| MiniMax | ✅ | ❌ |
+| DeepSeek | ✅ | ❌ |
 
-The tool surface is the **only** way the LLM mutates state. The memory pass is the *only* call that can create/mutate memories or enrich app categories; the profile pass cannot.
+Embeddings are fixed to `text-embedding-3-small` (1536-dim). Every `memories.embedding` row uses this model — switching requires a re-embed migration.
 
-### 7.2 Chat — `brain/chat.ts`
-
-`runChatTurn(history)` runs a tool-calling loop (`TOOL_LOOPS=4`) with `getToolsForScope('chat')`. RAG: `buildChatSystemPrompt` calls `retrieveContext({decisionType:'chat'})` and appends the markdown memory block. Cost = sum of per-loop usage.
-
-### 7.3 Nightly — `brain/nightly.ts` (two-pass, raw-events-aware)
-
-Watchdog fires once per night around 03:05 local. **Two separate model runs**, each its own tool-calling loop. Splitting them lets the memory pass eat the expensive raw-event context while the profile pass stays cheap and deterministic — and isolates failure (a malformed profile JSON cannot lose the memories already saved).
-
-**Pre-LLM (idempotent SQL, no tokens):** finalise yesterday's `productivity_score`, run `computeNudgeEffectiveness` for the last 7 days.
-
-**Pass 1 — Memory (`runMemoryPass(yesterday)`)**
-
-Goal: build the most accurate possible mental model of *yesterday* from primary evidence, and reconcile it with the existing memory store.
-
-Inputs (assembled by `brain/rawEvents.ts` + helpers):
-- **Yesterday's full event timeline**, sorted by `ts`, one event per line in compact JSON. Every payload still carries the `_ctx` block stamped at insert time (place, battery, charging, network, audio). Hard cap `MAX_EVENTS_FOR_MEMORY ≈ 2000`; over the cap, low-signal `app_fg` rows below a duration threshold are dropped first.
-- Yesterday's `daily_rollup` (the deterministic summary, for cross-checking).
-- Date / weekday / month-day for the target date.
-- PRIOR profile snapshot.
-- Recent memory state: unverified predictions targeting yesterday, count of un-enriched `app_categories`, top-k similar active memories pulled by `retrieveContext`.
-
-Loop: up to `MEMORY_TOOL_LOOPS = 8`, scope `nightly_memory`. The model is instructed to **extract** new memories (`create_memory`), **verify** predictions whose target date has passed (`verify_memory`), **reinforce / contradict / archive** memories the day confirms or refutes, **consolidate** clusters of specifics into abstract parents (`consolidate_memories`), and **enrich** unenriched `app_categories` rows (`set_app_category`). The final assistant message is free-form — we do not parse it; the side effects (memory rows + app_category rows) *are* the output.
-
-**Pass 2 — Profile (`runProfilePass(yesterday)`)**
-
-Goal: rebuild `behavior_profile.data` from rollups + verified correlations + the memory store the memory pass just refreshed.
-
-Inputs:
-- PRIOR profile.
-- Last 30 `daily_rollup` rows + last 3 `monthly_rollup` rows.
-- `buildVerifiedFacts(...)`.
-- A digest of the memory store (top memories by `computeEffectiveScore`, recent verified predictions, recent contradictions).
-
-Loop: up to `PROFILE_TOOL_LOOPS = 4`, scope `nightly_profile` (reads only). Final assistant message is the new `behavior_profile` JSON (no prose). Validate (strip ``` fences, slice to brace pair, check v3 sentinel keys) → UPSERT `behavior_profile` (id=1) → write `schema_meta.last_nightly_ts`.
-
-**Cost envelope (gpt-5.4-mini, $0.25 / $2.00 per M tokens):**
-
-| Day shape | Memory pass | Profile pass | Total |
-|---|---|---|---|
-| ~600 events | ~$0.04 | ~$0.01 | ~$0.05 |
-| ~1200 events | ~$0.08 | ~$0.01 | ~$0.09 |
-| ~2500 events (cap) | ~$0.20 | ~$0.01 | ~$0.21 |
-
-Both passes go through the cost-cap wall (`llm/ledger.ts`). If the memory pass exhausts the cap, the profile pass is skipped — yesterday's memories are still saved, profile rebuild retries the next night.
-
-**Mutation invariants (still hold):** memory mutation is restricted to feedback columns. The original `summary`/`cause`/`effect`/`embedding` of every memory is permanent (or the row gets archived and a new one is created). Original event payload/ts/kind are immutable forever.
-
-### 7.4 Smart-nudge tick — `brain/smartNudge.ts`
-
-Every 15 min, gated by 90-min smart cooldown. Single JSON-mode call, fires at most one notification. Will be retired once Stage 14 LLM-generated rules ship.
+Adding a new provider: one file in `providers/`, one row in `MODELS`, add to `ProviderId` union. Nothing else changes.
 
 ---
 
-## 8. Memory store
+## Chat
 
-[client/src/memory/](../client/src/memory/) — see CLAUDE.md.
+`brain/chat.ts` — `runChatTurn(history)` runs a tool-calling loop (max 4 turns).
 
-- **`embed.ts`** — wraps `runEmbedTask('embed', ...)`. `text-embedding-3-small` (1536-dim). Returns `null` on cap/no-key/fail. Exports `cosineSim`.
-- **`store.ts`** — CRUD + scoring. `createMemory` is the only insert path; it embeds and inserts atomically, returns `null` on embed failure. `reinforceMemory`, `contradictMemory`, `archiveMemory`, `recordPredictionOutcome`, `touchMemories`. `computeEffectiveScore(m)` blends raw impact + reinforcement vs. contradiction + recency decay.
-- **`rag.ts`** — `retrieveContext(query)` embeds the query, scans active memories with `cosineSim`, re-ranks by `0.5·sim + 0.2·exp(-daysOld/30) + 0.15·|impact| + 0.15·confidence` (+ tag-overlap bonus), `touchMemories` on top-k. Returns a markdown `contextBlock` ready to drop into a prompt. On embed failure returns `{embedded:false, memories:[]}` so callers fall back gracefully.
+The chat assistant has access to read-only views of your data and a few write tools:
 
-No `sqlite-vss`. No native module. In-process cosine over `WHERE archived_ts IS NULL`.
+**Read tools:** today's summary, daily rollups, monthly rollups, profile, recent nudges, memory search, raw event windows, app time breakdowns, places list, todos, proactive questions.
 
----
+**Write tools:** create/update todos, propose a rule (inserted disabled, for your review), archive a memory, add a geofenced place, ask you a proactive question.
 
-## 9. LLM provider abstraction
-
-[client/src/llm/](../client/src/llm/) — see CLAUDE.md.
-
-- **`router.ts`** — `runChatTask(taskKind, request)` and `runEmbedTask(request)`. Both return discriminated unions (`ok` / `skipped` / `failed`); never throw. Handles cost cap, key lookup, provider dispatch, pricing, `llm_calls` insert.
-- **`models.ts`** — declarative catalogue. Today: `gpt-5.4-mini` (chat + tools), `text-embedding-3-small` (embed), `openai/gpt-5.4-mini` (chat via OpenRouter), and OpenRouter's reasoning-class model. `DEFAULT_TASK_MODELS` maps each `TaskKind` to a default.
-- **`providers/`** — one adapter per provider. `openai.ts` (chat + embed), `openrouter.ts` (chat, OpenAI-compat shape with `HTTP-Referer` + `X-Title`).
-- **`keys.ts`** — `expo-secure-store` keyed by provider id. Settings → AI Models lets the user paste any subset of provider keys and pick which model handles each task.
-- **`assignments.ts`** — persisted in `schema_meta.task_assignments`. Per-task model override.
-- **`ledger.ts`** — single source of truth for cost-cap reads + `llm_calls` writes.
-
-Adding a third provider: create one file in `providers/`, add models to `models.ts`, add `'foo'` to `ProviderId` and `ALL_PROVIDERS`. No other code changes.
+Every chat response is grounded in your actual data. The AI cannot invent statistics — numbers come from SQL queries.
 
 ---
 
-## 10. UI (React Native)
+## Proactive Questions
 
-[client/src/screens/](../client/src/screens/) — see CLAUDE.md.
+The system can interrupt you with a question when it detects a gap in its understanding.
 
-Bottom tabs: **Today**, **Observe**, **Chat**, **Settings**. Settings opens **Profile**, **AI Models**, and the **Permissions** card as overlays.
+Three triggers (checked every aggregator tick):
+- **Long unknown dwell** — you've been in one place for 90+ minutes and the place isn't named in your geofences
+- **Weekend late night** — it's a Saturday or Sunday between 10pm–2am and you're idle
+- **No phone usage** — less than 5 minutes of app foreground time in the last 2 hours during normal hours
 
-All screens read directly from SQLite (no Redux, no fetcher). Manual `Run aggregator now` button on Today for debugging.
+When triggered: one AI call drafts a question (with options matching `expected_kind`), an interactive notification fires, and the answer is materialized into a memory tagged with the trigger context.
 
----
-
-## 11. Hard rules (assistants must obey)
-
-These are the same rules in [CLAUDE.md](../CLAUDE.md), repeated for visibility.
-
-**1. Simplicity above all.** Write code a human can read top-to-bottom and understand on first pass. Prefer fewer lines, but not at the cost of clarity. Use intuitive, fully-spelled variable and function names — 1–4 word names are fine; cryptic abbreviations are not. Debuggability > extensibility.
-
-  *Anti-pattern (don't do this):*
-  ```ts
-  for (const r of ranked) {
-    const m = r.memory;
-    const impactPct = (m.impact_score * 100).toFixed(0);
-    const confPct  = (m.confidence   * 100).toFixed(0);
-    // ...
-  }
-  ```
-  *What's wrong:* `r`, `m`, `pct` force the reader to scroll up to remember what each is.
-
-  *Better:*
-  ```ts
-  for (const ranked of rankedMemories) {
-    const memory = ranked.memory;
-    const impactPercent     = (memory.impact_score * 100).toFixed(0);
-    const confidencePercent = (memory.confidence   * 100).toFixed(0);
-    // ...
-  }
-  ```
-
-2. No `any`. Strict TS. Fix types at the source.
-3. No future-stage installs.
-4. No abstractions for one call site.
-5. Local-first, no server.
-6. **Raw events go to ONE LLM call only: `runMemoryPass`.** That pass receives yesterday's full event timeline (ts, kind, source, payload, `_ctx` ambient block — place, battery, charging, network, audio, weekday, etc.) so memories are precise and personalised. Every other LLM surface (chat, profile pass, smart-nudge) sees only `behavior_profile` + rollups + memory context (via RAG). Memories — built from raw evidence — are the canonical bridge between primary data and the rest of the brain.
-7. Schema is JS-owned. Kotlin only INSERT/SELECTs declared columns.
-8. Cost cap is a hard wall. Every LLM call checks today's `llm_calls.cost_usd` sum first.
-9. CLAUDE.md is read before editing and updated after.
-10. The LLM narrates facts, never invents them. Correlation numbers come from `verifiedFacts.ts`.
-11. **Memories are append-only at the semantic level.** The LLM can mutate feedback columns and add/archive rows, never edit `summary`/`cause`/`effect`/`embedding`.
-12. **Original event metadata is immutable.** No code path rewrites `ts`/`kind`/`payload`.
+Hard limits: max 3 questions per day, ≥6h between any two, no question if one is already pending.
 
 ---
 
-## 12. Stage tracker pointer
+## The UI
 
-The active stage list (with status + scope per stage) lives in the project root [CLAUDE.md](../CLAUDE.md). This document only describes what is **already shipped**; for what's next, look there.
+Four tabs. Everything else is an overlay from Settings.
+
+```
+TODAY
+  Productivity score (0–100) with 7-day sparkline
+  Sleep card (bedtime → wake time)
+  Top 3 apps with brand icons + category labels
+  Today's nudges with ▲/▼ rating
+  Pending AI question (if any)
+
+OBSERVE
+  Events feed (raw stream, infinite scroll)
+  Daily/monthly rollup dashboard
+  LLM call log (cost per call)
+  Nudges history (filter by helpful/annoying)
+
+CHAT
+  Ask anything about your patterns
+  Full tool-calling against your SQLite data
+
+SETTINGS → PROFILE
+  Your current behavior_profile rendered:
+    causal chains, habit loops, verified correlations, rule suggestions
+
+SETTINGS → AI MODELS
+  Configure API keys for each provider
+  Assign which model handles each task
+
+SETTINGS → PLACES
+  Add/edit/delete geofenced locations
+  Capture current GPS position
+```
+
+---
+
+## Redesign Direction
+
+The current app is built for a developer. The launch version should feel like the app already knows the user.
+
+**What this means concretely:**
+
+| Current | Launch |
+|---|---|
+| "Grant Usage Access"	 | Tell us one pattern you wish you understood
+ |
+| First screen is a permissions checklist | First screen is a single promise: "In 3 days, we'll show you something about yourself you didn't know." |
+| Today screen leads with system status + debug buttons | Today screen leads with the insight, not the infrastructure |
+| Behavior profile buried in Settings → Profile | Profile IS the home screen once data exists (>3 days) |
+| Raw event tables visible by default | Hidden behind a developer toggle |
+| Productivity score as the hero metric | The most surprising recent insight as the hero |
+| "Run aggregator now" debug button prominent | Invisible to normal users |
+
+The **behavior profile** and **chat** are the product. Everything else is plumbing that should be invisible.
+
+
+#### **The pitch that drives the redesign:**
+
+###### What's Actually Missing in the Market (the real opportunity)
+Every productivity/tracking app today does one of two things:
+
+1. Passive data (Screen Time, Wellbeing) — shows you numbers, no insight, no action
+2. Manual input (journals, habit trackers) — only as good as your self-awareness
+3. Automatic, causal, private behavioral understanding — nobody does this.
+
+That's the white space. The pitch is:
+
+> *"You don't need more discipline. You need to understand the actual trigger. Your phone has the data. We decode it."*
+
+Every screen decision should be evaluated against: does this help the user understand a cause-effect relationship they didn't see before?
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| UI | React Native (Expo bare) + TypeScript strict |
+| Native collectors | Kotlin (single bridge module, OS APIs only) |
+| Local database | `expo-sqlite` (rollback journal — not WAL, required for Kotlin+JS dual access) |
+| API key storage | `expo-secure-store` |
+| Notifications | `expo-notifications` (local only, no FCM) |
+| Background work | `expo-background-fetch` + `expo-task-manager` (Android WorkManager) |
+| Nightly alarm | `AlarmManager` (Kotlin) |
+| AI calls | Direct HTTPS `fetch` — no SDKs |
+
+---
+
+## How to Run
+
+No server. Two terminals:
+
+```bash
+# Terminal 1 — Metro
+cd client && npx expo start --dev-client
+
+# Terminal 2 — install (only when Kotlin or manifest changes)
+cd client/android && ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8081 tcp:8081
+adb shell am force-stop com.lifeos
+adb shell monkey -p com.lifeos -c android.intent.category.LAUNCHER 1
+```
+
+JS-only changes hot-reload through Metro. Only rebuild when Kotlin or `AndroidManifest.xml` changes.
+
+### Required env
+
+```bash
+export ANDROID_HOME=$HOME/Library/Android/sdk
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PATH=$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools
+```
+
+### Useful logcat
+
+```bash
+adb logcat -s 'LifeOsService:*' 'LifeOsBridge:*' 'LifeOsBoot:*' 'AndroidRuntime:E'
+```
+
+---
+
+## Hard Rules
+
+1. **No server, ever.** All state lives in `<filesDir>/SQLite/lifeos.db`.
+2. **Raw events go to the memory pass only.** Chat, profile, rules all see derived data.
+3. **Schema is JS-owned.** Kotlin only INSERTs against columns declared in `db/schema.ts`.
+4. **Cost cap is a hard wall.** Every AI call checks today's spend first.
+5. **Memories are append-only at the semantic level.** Soft-archive, never edit summary/cause/effect/embedding.
+6. **Events are immutable.** No code path rewrites `ts`, `kind`, or original payload fields.
+7. **The LLM narrates facts, never invents them.** All correlation numbers come from `verifiedFacts.ts`.

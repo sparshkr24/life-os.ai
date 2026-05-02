@@ -14,8 +14,8 @@ import type { SilenceCorrelation } from './behaviorProfile.types';
  * vs. all other days (last 90 days window).
  *
  * Requires `daily_rollup.data.late_night_screen_min` to be populated by the
- * aggregator (Stage 5). Returns null if there are < 5 samples on either side
- * — Sonnet then omits the correlation rather than narrating noise.
+ * aggregator. Returns null if there are < 5 samples on either side
+ * — the profile pass then omits the correlation rather than narrating noise.
  */
 export async function lowPhoneNightCorrelation(
   db: SQLite.SQLiteDatabase,

@@ -20,8 +20,7 @@
  *      "Wall-clock in window AND today's `category` minutes ≥ threshold AND
  *       user currently inside the place whose `label` == location"
  *
- * Anything we don't recognise is logged + skipped (forward-compat for rules
- * authored by the nightly LLM in Stage 8).
+ * Anything we don't recognise is logged + skipped (forward-compat for AI-generated rules).
  */
 import type * as SQLite from 'expo-sqlite';
 import { withDb } from '../db';

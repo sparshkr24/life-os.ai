@@ -1,18 +1,13 @@
 /**
- * Stage 15 / 16 — deterministic memory maintenance sweep.
+ * Deterministic memory maintenance sweep. Runs after the nightly memory pass.
  *
- * Runs after the nightly memory pass (LLM tool loop) has finished. The LLM
- * does the interpretive work (verify_memory / reinforce_memory /
- * contradict_memory / consolidate_memories / mark_memory_archived). This file
- * is the safety net: pure SQL that closes the feedback loop and keeps the
- * memory store from accumulating clearly-bad rows even if the LLM misses one.
+ * Pure SQL safety net — archives rows the LLM may have missed:
+ *   - Failed predictions never reinforced
+ *   - Consistently disproven (contradiction≥3 AND ≥2×reinforcement)
+ *   - Confidence < 0.10 with no reinforcement
+ *   - Consolidation children whose parent is ≥14 days old
  *
- * Invariants:
- *   - Soft-delete only. We set `archived_ts`; we never DELETE.
- *   - Original event metadata is never touched (this only operates on the
- *     derived `memories` table).
- *   - Idempotent. Running this twice in the same night is a no-op on the
- *     second pass because every WHERE includes `archived_ts IS NULL`.
+ * Soft-delete only. Idempotent (every UPDATE includes `archived_ts IS NULL`).
  */
 import { withDb } from '../db';
 

@@ -24,13 +24,13 @@ export type ProviderId = 'openai' | 'openrouter';
  * their task by kind, never by provider/model.
  */
 export type TaskKind =
-  | 'nightly'         // Stage 8 / v3 Phase E — nightly tool-calling session: extract+verify+consolidate+app-cat+profile
-  | 'chat'            // Stage 9 — user-facing chat with tool calls
-  | 'smart_nudge'     // Stage 7 — 15-min decision to nudge or stay silent
-  | 'consolidation'   // Reserved — weekly memory merge (future)
-  | 'rule_generation' // Stage 14 — weekly LLM-generated rules (future)
-  | 'proactive_question' // v7 — 90-min proactive question pass (gpt-4o-mini class)
-  | 'embed';          // Stage 12 — text → vector for memory store
+  | 'nightly'            // nightly tool-calling session: memory → profile → rules
+  | 'chat'               // user-facing chat with tool calls
+  | 'smart_nudge'        // reserved — not active; rules are LLM-curated nightly
+  | 'consolidation'      // reserved — weekly memory merge (future)
+  | 'rule_generation'    // nightly nudge pass: LLM-generated rules
+  | 'proactive_question' // proactive question pass (gpt-4o-mini class)
+  | 'embed';             // text → vector for memory store
 
 /** Capability flags a model declares so the router can validate assignments. */
 export interface ModelCapabilities {

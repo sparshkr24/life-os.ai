@@ -1,18 +1,17 @@
 /**
- * Proactive AI questions (v7).
+ * Proactive AI questions.
  *
- * Runs at the end of every aggregator tick. Three deterministic detectors
- * decide whether the phone is seeing a *possibly meaningful* gap (long dwell
- * outside any known place, total phone silence during a normally-active
- * hour, weekend-late-night dwell). When at least one detector fires, a small
- * gpt-5.4-mini-class call drafts a single short question with options. The
- * row goes into `proactive_questions` and an interactive notification fires.
+ * Runs at the end of every aggregator tick. Three deterministic detectors check
+ * for meaningful gaps in behavior: long dwell outside any known place, phone
+ * silence during normally-active hours, late-night weekend dwell.
+ * When one fires, a small LLM call drafts a question with options, a row is
+ * inserted into proactive_questions, and an interactive notification fires.
  *
- * Hard gates (cheap, run BEFORE the LLM call):
- *   - 6-h throttle                            (schema_meta.last_proactive_question_ts)
- *   - daily cap of 3 questions                (count(status≠'expired') today)
- *   - no pending question already             (no status='pending' rows)
- *   - same trigger not asked in last 24 h     (count by trigger_kind)
+ * Hard gates (checked before any LLM call):
+ *   - 6-h throttle (schema_meta.last_proactive_question_ts)
+ *   - daily cap of 3 questions
+ *   - no pending question already
+ *   - same trigger not asked in last 24h
  *   - cost cap                                (router enforces via runChatTask)
  *
  * The LLM is told to either return `{should_ask: false, …}` (we drop the
@@ -342,7 +341,7 @@ async function detectWeekendLateNight(
  * at `now`. Reads `activity` events; if the very latest one is not STILL,
  * returns 0.
  *
- * Activity events are written by the Stage-3b transition receiver with
+ * Activity events are written by the ActivityTransitionReceiver with
  * payload `{type: 'STILL'|'WALKING'|'RUNNING'|'IN_VEHICLE'|'ON_BICYCLE',
  * transition: 'enter'|'exit'}`. We treat 'enter' as the start of a streak
  * and the next 'exit' (or any other type's 'enter') as its end.

@@ -1,19 +1,14 @@
 /**
- * RAG retrieval. Stage 12 scaffolding.
+ * RAG retrieval. Stateless — callable from any LLM context.
  *
- * Pipeline (stateless, callable from any LLM stage):
- *   1. Build a query string from the decision context.
- *   2. Embed it via `embedText` (cost-capped, can return null).
- *   3. Scan all active memories, compute cosine similarity in-process.
- *   4. Re-rank with similarity·0.5 + recency·0.2 + |impact|·0.15 + confidence·0.15.
- *   5. Touch the top-k (bumps last_accessed → drives recency next time).
+ * Pipeline:
+ *   1. Embed the query text.
+ *   2. Scan all active memories, compute cosine similarity in-process.
+ *   3. Re-rank: similarity·0.5 + recency·0.2 + |impact|·0.15 + confidence·0.15.
+ *   4. Touch the top-k (bumps last_accessed for future recency scoring).
  *
- * `retrieveContext` returns null on embed failure so callers can fall back to
- * the pre-RAG path (Stage 13 wiring will respect this — RAG augments, never
- * gates, the existing nightly/chat flows).
- *
- * Performance budget: ≤30 ms for top-5 over 1 K active memories on Pixel-class
- * hardware. Re-evaluate when active count crosses 5 K.
+ * Returns {embedded:false, memories:[]} on embed failure — callers fall back gracefully.
+ * Performance: ≤30ms for top-5 over 1K memories. Re-evaluate if active count crosses 5K.
  */
 import { cosineSim, embedText } from './embed';
 import { listActiveMemories, touchMemories, type Memory } from './store';

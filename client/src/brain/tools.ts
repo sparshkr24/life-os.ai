@@ -1,27 +1,15 @@
 /**
- * Brain toolbox. Single registry of every tool the LLM can call.
+ * Single registry of every tool the LLM can call, scoped by caller:
+ *   'chat'           — user-facing chat (read tools + limited writes)
+ *   'nightly_memory' — memory pass (read tools + memory/category mutations)
+ *   'nightly_profile'— profile pass (read tools only)
+ *   'nightly_nudge'  — nudge pass (read tools + rule mutations)
  *
- * Each tool declares which **scopes** it's allowed in:
- *   - `chat`    — user-facing chat turn (read-mostly; can create todos /
- *                 propose rules / archive memories the user explicitly OKs).
- *   - `nightly` — single tool-calling session at 03:05 (read-mostly; can
- *                 mutate **memories** and **app_categories** as part of
- *                 verification + consolidation + enrichment).
- *
- * **Hard rules (do not relax without updating CLAUDE.md):**
- *   1. No tool may modify *original* event metadata: `events.ts`, `events.kind`,
- *      original `payload` fields written by the Kotlin collectors. Only the
- *      derived columns (memories, app_categories, rules, todos) are mutable
- *      from here.
- *   2. No tool may DELETE rows. Soft-delete via archived_ts / status only.
- *   3. Raw-event reads are bounded — every `get_events_window` call is hard-
- *      capped at 500 rows so the LLM cannot accidentally pull the full table.
- *   4. Nightly mutations on memories touch ONLY feedback columns
- *      (`actual_outcome`, `was_correct`, `reinforcement`, `contradiction`,
- *      `confidence`, `archived_ts`, `parent_id`, `child_ids`, `last_accessed`,
- *      `updated_ts`). Never `summary`, `cause`, `effect`, `embedding`,
- *      `created_ts`, `rollup_date`. New memories go through `createMemory`
- *      which always allocates a fresh embedding.
+ * Hard rules:
+ *   - No tool modifies original event metadata (events.ts, events.kind, payload).
+ *   - No tool DELETEs rows. Soft-delete via archived_ts / status only.
+ *   - get_events_window is hard-capped at 500 rows.
+ *   - Nightly memory mutations touch only feedback columns, never summary/cause/effect/embedding.
  */
 import { withDb } from '../db';
 import { deviceTz, localDateStr, prevDate } from '../aggregator/time';
@@ -1231,7 +1219,7 @@ add({
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// NIGHTLY-NUDGE writes (Stage 14 — LLM-generated rules)
+// NIGHTLY-NUDGE writes — LLM-generated rules only.
 // Write tools below operate ONLY on rules with source='llm'. Existing
 // 'user' / 'seed' rules are read-only here — the user owns those.
 // ─────────────────────────────────────────────────────────────────────────

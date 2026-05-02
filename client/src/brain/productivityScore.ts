@@ -11,8 +11,8 @@
  *   move    15%   active_minutes / 60, capped at 1.0
  *   nudge   15%   acted/fired; 0.5 if no nudges fired
  *
- * Called by the aggregator (Stage 5) at the end of every rebuild for that day,
- * and by the nightly job for yesterday before Sonnet runs.
+ * Called by the aggregator at the end of every rollup rebuild,
+ * and by the nightly job for yesterday before the memory pass runs.
  */
 import type * as SQLite from 'expo-sqlite';
 

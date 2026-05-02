@@ -1,10 +1,8 @@
 /**
  * `behavior_profile.data` v3 type definitions.
  *
- * Sonnet writes JSON matching `BehaviorProfileV3`; the nightly runner
- * (Stage 8) validates the response before persisting. v2 base shape stays —
- * v3 only adds new top-level keys (causal_chains, day_attribution,
- * rule_suggestions, silence_priors, silence_correlations).
+ * The nightly profile pass outputs JSON matching this shape.
+ * Validated before persisting to behavior_profile.
  */
 
 export type SilenceLabel = 'sleep_or_rest' | 'focused_work' | 'workout' | 'reading' | 'other';
@@ -83,7 +81,7 @@ export interface SilenceCorrelation {
 /**
  * Forward-compat: the v2 keys (identity, schedule, habits_*, time_wasters,
  * productivity_windows, predictions, open_loops, deviations, model_self_eval)
- * are intentionally typed as `unknown` here. The Stage-8 runner will share
+ * are intentionally typed as `unknown` here. The nightly runner will share
  * a single source of truth for the full shape; this file owns only the v3
  * additions to keep them isolated.
  */

@@ -19,18 +19,16 @@ type LifeOsBridgeNative = {
     dbExists: boolean;
   }>;
 
-  // Stage 3b — Activity Recognition + Sleep API.
   hasActivityRecognitionPermission(): Promise<boolean>;
   requestActivityRecognitionPermission(): Promise<void>;
 
-  // Stage 3c — Location + Geofencing.
   hasLocationPermissions(): Promise<{ fine: boolean; background: boolean }>;
   requestForegroundLocation(): Promise<void>;
   requestBackgroundLocation(): Promise<void>;
   setGeofences(places: LifeOsPlace[]): Promise<number>;
   removeAllGeofences(): Promise<void>;
 
-  // v7 — one-shot current location for the Places UI / proactive questions.
+  /** One-shot GPS fix. Used by the Places UI and the proactive question engine. */
   getCurrentLocation(): Promise<{
     lat: number;
     lng: number;
@@ -38,7 +36,6 @@ type LifeOsBridgeNative = {
     ts: number;
   }>;
 
-  // Stage 3d — Health Connect.
   isHealthConnectAvailable(): Promise<boolean>;
   openHealthConnect(): Promise<void>;
 };

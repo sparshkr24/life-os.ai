@@ -1,9 +1,8 @@
 import type { AppCategory, RemindStrategy } from './schema';
 
 /**
- * Curated app classification seed. Stage 1 covers the ~15 apps the user
- * actually opens daily. Unknown packages default to 'neutral' at runtime
- * (logic lives in classifier in a later stage).
+ * Curated app classification seed. Covers the most-used apps.
+ * Unknown packages default to 'neutral' at runtime.
  */
 export const SEED_APP_CATEGORIES: ReadonlyArray<{
   pkg: string;

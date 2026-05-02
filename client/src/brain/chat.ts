@@ -1,15 +1,11 @@
 /**
- * Stage-9 Chat. Tool-calling against the local SQLite DB.
+ * Chat turn runner. Tool-calling against local SQLite with RAG-injected context.
  *
- * Loop:
- *   1. cost-cap + key check     (hard wall)
- *   2. POST chat completion     with `tools` + the running message log
- *   3. if stop_reason=tool_use  execute the tool locally → append tool_result
- *      → POST again (max TOOL_LOOPS iterations)
- *   4. accumulate text blocks → return final assistant message
+ * Loop: cost-cap check → POST with tools → if tool_use, execute locally → repeat
+ * (max TOOL_LOOPS iterations) → return final assistant message.
  *
- * Tool definitions and handlers live in `brain/tools.ts`. This file is now
- * just the loop + RAG context building.
+ * Tool definitions and handlers live in brain/tools.ts.
+ * RAG context is injected via buildChatSystemPrompt before the first call.
  */
 import { retrieveContext } from '../memory/rag';
 import { runChatTask } from '../llm/router';
@@ -141,7 +137,7 @@ function done(r: ChatRunResult, startedAt: number): ChatRunResult {
 }
 
 /**
- * Stage 13: pull memories relevant to the user's latest question and append
+ * Pull memories relevant to the user's latest question and append
  * them to SYSTEM_PROMPT as a MEMORY_CONTEXT section. Falls back to the bare
  * SYSTEM_PROMPT when there are no memories yet or RAG fails.
  */
