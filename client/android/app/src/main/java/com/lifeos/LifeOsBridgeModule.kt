@@ -1,7 +1,6 @@
 package com.lifeos
 
 import android.app.AppOpsManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -305,29 +304,6 @@ class LifeOsBridgeModule(private val ctx: ReactApplicationContext) :
     m.putDouble("accuracyM", loc.accuracy.toDouble())
     m.putDouble("ts", loc.time.toDouble())
     return m
-  }
-
-  // ─── Stage 3c: NotificationListener access ────────────────────────────────
-
-  @ReactMethod
-  fun hasNotificationListenerAccess(promise: Promise) {
-    val cn = ComponentName(ctx, LifeOsNotificationListener::class.java)
-    val flat = Settings.Secure.getString(
-      ctx.contentResolver, "enabled_notification_listeners"
-    ) ?: ""
-    promise.resolve(flat.contains(cn.flattenToString()))
-  }
-
-  @ReactMethod
-  fun openNotificationListenerSettings(promise: Promise) {
-    try {
-      val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      ctx.startActivity(intent)
-      promise.resolve(null)
-    } catch (e: Exception) {
-      promise.reject("settings_failed", e.message ?: "unknown", e)
-    }
   }
 
   // ─── Stage 3d: Health Connect ─────────────────────────────────────────────

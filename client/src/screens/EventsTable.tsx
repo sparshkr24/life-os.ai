@@ -19,7 +19,6 @@ import {
   makeStyles,
   parseEvent,
   prettyPkg,
-  safeJson,
   useAsyncRunner,
 } from './shared';
 import { AppIcon } from './widgets';
@@ -125,25 +124,15 @@ export function EventsTable() {
     const p = parseEvent(r);
     const tint = theme.kindColors[r.kind] ?? theme.accent;
     const appLabel = p.pkg ? prettyPkg(p.pkg) : r.kind;
-    // Notifs have no meaningful duration unless they were "ongoing" (music,
-    // navigation, calls). For everything else show the notif category in
-    // the sub-line and skip the duration column entirely.
-    const rawPayload = safeJson(r.payload) as Record<string, unknown> | null;
-    const isNotif = r.kind === 'notif';
-    const notifCategory =
-      isNotif && rawPayload && typeof rawPayload.category === 'string' ? rawPayload.category : '';
-    const notifOngoing = isNotif && rawPayload?.ongoing === true;
     const sub =
       r.kind === 'app_fg' || r.kind === 'app_bg'
         ? `${fmtClock(p.startTs)} → ${fmtClock(p.endTs)}`
-        : isNotif
-          ? notifCategory
-            ? `notif · ${notifCategory}${notifOngoing ? ' · ongoing' : ''}`
-            : `notif${notifOngoing ? ' · ongoing' : ''}`
-          : r.kind.replace(/_/g, ' ');
-    // Hide duration for transient notifs (always 0); show it only for
-    // ongoing notifs that were actually closed (have real duration_ms).
-    const showDuration = !isNotif || (notifOngoing && p.durationMs > 0);
+        : r.kind.replace(/_/g, ' ');
+    // `steps` and `heart_rate` rows span a measurement bucket (5–15 min).
+    // The "duration" parseEvent computes from end_ts − start_ts is the
+    // bucket width, not how long the user walked / their HR was sampled,
+    // so it's actively misleading. Hide it for those kinds.
+    const showDuration = r.kind !== 'steps' && r.kind !== 'heart_rate';
     return (
       <Pressable onPress={() => setExpanded(isOpen ? null : r.id)} style={s.eventRow}>
         <View style={[s.eventTint, { backgroundColor: tint }]} />

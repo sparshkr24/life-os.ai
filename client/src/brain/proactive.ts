@@ -9,7 +9,7 @@
  * row goes into `proactive_questions` and an interactive notification fires.
  *
  * Hard gates (cheap, run BEFORE the LLM call):
- *   - 120-min throttle                        (schema_meta.last_proactive_question_ts)
+ *   - 6-h throttle                            (schema_meta.last_proactive_question_ts)
  *   - daily cap of 3 questions                (count(status≠'expired') today)
  *   - no pending question already             (no status='pending' rows)
  *   - same trigger not asked in last 24 h     (count by trigger_kind)
@@ -37,7 +37,7 @@ import type {
 } from '../db/schema';
 
 const META_KEY_LAST_TS = 'last_proactive_question_ts';
-const MIN_INTERVAL_MS = 120 * 60 * 1000;     // 120 min between questions
+const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 h between proactive questions
 const DAILY_CAP = 3;
 const SAME_TRIGGER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const QUESTION_EXPIRY_MS = 24 * 60 * 60 * 1000;

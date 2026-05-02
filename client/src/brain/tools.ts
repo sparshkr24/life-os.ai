@@ -135,7 +135,6 @@ const ALLOWED_EVENT_KINDS: EventKind[] = [
   'geo_exit',
   'activity',
   'steps',
-  'notif',
   'heart_rate',
   'inferred_activity',
   'user_clarification',

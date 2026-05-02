@@ -31,6 +31,11 @@ class LifeOsForegroundService : Service() {
   private val handler = Handler(Looper.getMainLooper())
   private var lastPollMs: Long = 0L
   private var lastHcPollMs: Long = 0L
+  // Last package we saw a RESUMED for. Used for implicit-close-on-switch:
+  // when RESUMED fires for app B, we close any still-open session for A.
+  // PAUSED/STOPPED events are flaky on swipe-from-recents and screen-off,
+  // but RESUMED-of-something-else is rock solid — so we anchor on that.
+  private var currentFgPkg: String? = null
   // Last time we *kicked* the headless aggregator from this service. We
   // also read schema_meta.last_aggregator_ts to coordinate with the JS
   // foreground driver — whichever ran more recently wins.
@@ -256,17 +261,25 @@ class LifeOsForegroundService : Service() {
     var inserted = 0
     var closed = 0
     var skipped = 0
+    // Per-pkg tally for the debug log: row's end_ts−start_ts after this
+    // poll's mutations. Lets us spot the "30 min went missing" bug at a
+    // glance without trawling SQL.
+    val perPkgEvents = HashMap<String, Int>()
+    val perPkgComputedMs = HashMap<String, Long>()
 
     try {
       while (events.hasNextEvent()) {
         events.getNextEvent(ev)
         totalSeen++
         val type = ev.eventType
-        // ACTIVITY_RESUMED (1) == MOVE_TO_FOREGROUND (deprecated alias).
-        // ACTIVITY_PAUSED  (2) == MOVE_TO_BACKGROUND (deprecated alias).
-        // We accept the numeric codes so deprecation warnings don't bite.
+        // ACTIVITY_RESUMED  (1)  — app moved to foreground.
+        // ACTIVITY_PAUSED   (2)  — app moved to background (often missed).
+        // ACTIVITY_STOPPED  (23) — activity fully stopped. Frequently the
+        //                          ONLY signal when the user swipes the app
+        //                          from recents, or when the screen turns
+        //                          off mid-session. Treat as a close.
         val isFg = type == 1
-        val isBg = type == 2
+        val isBg = type == 2 || type == 23
         if (!isFg && !isBg) continue
 
         val pkg = ev.packageName ?: continue
@@ -281,8 +294,22 @@ class LifeOsForegroundService : Service() {
           continue
         }
 
+        perPkgEvents[pkg] = (perPkgEvents[pkg] ?: 0) + 1
+
         try {
           if (isFg) {
+            // Implicit close on switch: if a DIFFERENT pkg was last seen
+            // foreground, close its open row at `ts`. This is what saves
+            // the "swipe-from-recents → no PAUSED" case for apps the user
+            // navigates away from before swiping.
+            val prev = currentFgPkg
+            if (prev != null && prev != pkg) {
+              val ms = closeOpenSessionMs(db, prev, ts)
+              if (ms != null) {
+                closed++
+                perPkgComputedMs[prev] = ms
+              }
+            }
             // Dedup at insert time: if the last app_fg row for this pkg has
             // its end_ts within DEDUP_GAP_MS of `ts`, just extend that row's
             // end_ts to `ts`. This collapses the rapid-fire RESUMED/PAUSED
@@ -290,20 +317,29 @@ class LifeOsForegroundService : Service() {
             // activities/fragments (WhatsApp scrolling, opening a chat, etc).
             // Falls through to a plain INSERT only when there's no recent
             // row to extend.
-            if (!extendRecentSession(db, pkg, ts)) {
+            val extendedMs = extendRecentSessionMs(db, pkg, ts)
+            if (extendedMs == null) {
               db.execSQL(
                 "INSERT INTO events (ts, kind, payload) VALUES (?, 'app_fg', ?)",
                 arrayOf<Any>(ts, PhoneState.stamp(buildPayload(pkg, ts, ts)))
               )
               inserted++
+              perPkgComputedMs[pkg] = 0L
             } else {
               closed++ // reuse counter — "extended" sessions
+              perPkgComputedMs[pkg] = extendedMs
             }
+            currentFgPkg = pkg
           } else {
-            // BG: find the most recent unclosed session for this pkg and close it.
-            // "Unclosed" means start_ts == end_ts in payload. We scan only the
-            // last 50 rows for this pkg — bounded.
-            if (closeOpenSession(db, pkg, ts)) closed++
+            // BG/STOPPED: close the most recent unclosed session for this
+            // pkg. We no longer require start_ts==end_ts — closing always
+            // wins as long as the new endTs advances the row.
+            val ms = closeOpenSessionMs(db, pkg, ts)
+            if (ms != null) {
+              closed++
+              perPkgComputedMs[pkg] = ms
+            }
+            if (currentFgPkg == pkg) currentFgPkg = null
           }
         } catch (e: Exception) {
           skipped++
@@ -315,64 +351,79 @@ class LifeOsForegroundService : Service() {
     }
 
     Log.i(TAG, "poll: range=${since}..${now} seen=$totalSeen inserted=$inserted closed=$closed skipped=$skipped")
+    // Per-pkg accuracy log. Only emit pkgs that actually saw events this
+    // poll — keeps logcat readable. computed_duration is the row's
+    // start_ts→end_ts span AFTER this poll's writes.
+    for ((pkg, count) in perPkgEvents) {
+      val ms = perPkgComputedMs[pkg] ?: -1L
+      val mins = if (ms >= 0) ms / 60_000L else -1L
+      Log.i(TAG, "[UsageStats] pkg=$pkg computed_duration=${mins}min raw_events=$count")
+    }
   }
 
   /**
    * If the most recent `app_fg` row for `pkg` has an end_ts within
-   * DEDUP_GAP_MS of `newTs`, extend that row's end_ts to `newTs` and return
-   * true. Otherwise return false (caller should INSERT a fresh row).
+   * DEDUP_GAP_MS of `newTs`, extend that row's end_ts to `newTs` and
+   * return the resulting (end_ts − start_ts) in ms. Returns null if no
+   * row was extended (caller should INSERT a fresh row).
    */
-  private fun extendRecentSession(db: SQLiteDatabase, pkg: String, newTs: Long): Boolean {
+  private fun extendRecentSessionMs(db: SQLiteDatabase, pkg: String, newTs: Long): Long? {
     val like = "%\"pkg\":\"$pkg\"%"
     db.rawQuery(
       "SELECT id, payload FROM events WHERE kind='app_fg' AND payload LIKE ? ORDER BY id DESC LIMIT 1",
       arrayOf(like)
     ).use { c ->
-      if (!c.moveToFirst()) return false
+      if (!c.moveToFirst()) return null
       val id = c.getLong(0)
-      val payload = c.getString(1) ?: return false
-      val startTs = extractLong(payload, "start_ts") ?: return false
+      val payload = c.getString(1) ?: return null
+      val startTs = extractLong(payload, "start_ts") ?: return null
       val curEnd = extractLong(payload, "end_ts") ?: startTs
       // Gap between the previous session's last-known timestamp and the new
       // RESUMED. If small, treat this as a continuation.
-      if (newTs - curEnd > DEDUP_GAP_MS) return false
+      if (newTs - curEnd > DEDUP_GAP_MS) return null
       // Don't go backwards.
-      if (newTs <= curEnd) return true // already covered, no-op success
+      if (newTs <= curEnd) return curEnd - startTs // already covered, no-op success
       // Re-stamp ambient `_ctx` so the row reflects current phone state.
       // Without this, every dedup-extended app_fg row loses _ctx entirely.
       db.execSQL(
         "UPDATE events SET payload = ? WHERE id = ?",
         arrayOf<Any>(PhoneState.stamp(buildPayload(pkg, startTs, newTs)), id)
       )
-      return true
+      return newTs - startTs
     }
   }
 
   /**
-   * Finds the newest open `app_fg` row for `pkg` (start_ts == end_ts in payload)
-   * and stamps its `end_ts` to `endTs`. Returns true if a row was updated.
+   * Finds the newest `app_fg` row for `pkg` and advances its `end_ts` to
+   * `endTs` (provided `endTs` would actually move it forward). Returns the
+   * resulting (end_ts − start_ts) in ms if a row was updated, else null.
+   *
+   * NOTE: we DO NOT require `start_ts == end_ts` here. A row that was
+   * already extended once by `extendRecentSessionMs` still needs its
+   * trailing time captured when PAUSED/STOPPED finally fires — older code
+   * gated on `curEnd == startTs` and dropped it, losing the tail of every
+   * navigated session.
    */
-  private fun closeOpenSession(db: SQLiteDatabase, pkg: String, endTs: Long): Boolean {
+  private fun closeOpenSessionMs(db: SQLiteDatabase, pkg: String, endTs: Long): Long? {
     val like = "%\"pkg\":\"$pkg\"%"
     db.rawQuery(
       "SELECT id, payload FROM events WHERE kind='app_fg' AND payload LIKE ? ORDER BY id DESC LIMIT 1",
       arrayOf(like)
     ).use { c ->
-      if (!c.moveToFirst()) return false
+      if (!c.moveToFirst()) return null
       val id = c.getLong(0)
-      val payload = c.getString(1) ?: return false
-      val startTs = extractLong(payload, "start_ts") ?: return false
+      val payload = c.getString(1) ?: return null
+      val startTs = extractLong(payload, "start_ts") ?: return null
       val curEnd = extractLong(payload, "end_ts") ?: startTs
-      // Only close if this row hasn't already been closed AND the BG event
-      // is later than the FG. Otherwise the BG event probably belongs to a
-      // session we never saw start (e.g. service restart) — ignore.
-      if (curEnd > startTs) return false
-      if (endTs <= startTs) return false
+      if (endTs <= curEnd) return null
+      // Sanity: don't accept absurdly long sessions (>12h) — a missed close
+      // followed by a rare event much later would otherwise inflate.
+      if (endTs - startTs > MAX_SESSION_MS) return null
       db.execSQL(
         "UPDATE events SET payload = ? WHERE id = ?",
         arrayOf<Any>(PhoneState.stamp(buildPayload(pkg, startTs, endTs)), id)
       )
-      return true
+      return endTs - startTs
     }
   }
 
@@ -499,6 +550,11 @@ class LifeOsForegroundService : Service() {
     // covers Android's RESUMED/PAUSED storms (sub-activity nav, share sheet
     // round-trips) without merging genuinely separate sessions.
     private const val DEDUP_GAP_MS = 90_000L
+    // Hard ceiling on a single session's duration. If a close event arrives
+    // hours after the open with no extensions in between, something went
+    // wrong (service was killed, phone slept, etc) — refuse rather than
+    // record a 14-hour LinkedIn session.
+    private const val MAX_SESSION_MS = 12L * 60L * 60_000L
 
     /**
      * Exact-match denylist for system pkgs we don't want to log. Real apps

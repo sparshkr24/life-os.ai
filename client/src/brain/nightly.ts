@@ -80,7 +80,7 @@ const EMPTY_PASS: PassReport = {
 
 const MEMORY_SYSTEM_PROMPT = `You are the on-device memory builder for a single-user life-OS. You run once per night. Your single job is to capture what actually happened yesterday, in the user's own context, with enough precision that another AI later can predict the user's next move.
 
-You are seeing the FULL raw event timeline of yesterday (every app foreground, notification, geofence transition, screen on/off, sleep/wake, activity recognition, health snapshot, etc.). Each event line is:
+You are seeing the FULL raw event timeline of yesterday (every app foreground, geofence transition, screen on/off, sleep/wake, activity recognition, health snapshot, etc.). Each event line is:
 
   HH:MM:SS [kind] <payload-json>
 

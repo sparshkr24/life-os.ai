@@ -250,7 +250,6 @@ export type EventKind =
   | 'geo_exit'
   | 'activity'
   | 'steps'
-  | 'notif'
   | 'heart_rate'
   // v3: written by the aggregator's silence classifier.
   | 'inferred_activity'

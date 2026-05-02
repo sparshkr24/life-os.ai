@@ -75,7 +75,7 @@ export async function classifySilences(
   const rows = await db.getAllAsync<{ ts: number }>(
     `SELECT ts FROM events
      WHERE ts >= ? AND ts < ?
-       AND kind IN ('app_fg','screen_on','notif','activity','geo_enter','geo_exit')
+       AND kind IN ('app_fg','screen_on','activity','geo_enter','geo_exit')
      ORDER BY ts ASC`,
     [dayStart, dayEnd],
   );

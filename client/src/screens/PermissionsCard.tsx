@@ -17,7 +17,6 @@ interface Status {
   activity: boolean | null;
   fineLoc: boolean | null;
   bgLoc: boolean | null;
-  notif: boolean | null;
   hcAvailable: boolean | null;
 }
 
@@ -26,7 +25,6 @@ const initial: Status = {
   activity: null,
   fineLoc: null,
   bgLoc: null,
-  notif: null,
   hcAvailable: null,
 };
 
@@ -39,11 +37,10 @@ export function PermissionsCard() {
   const refresh = async () => {
     if (!LifeOsBridge) return;
     try {
-      const [usage, activity, loc, notif, hc] = await Promise.all([
+      const [usage, activity, loc, hc] = await Promise.all([
         LifeOsBridge.hasUsageAccess(),
         LifeOsBridge.hasActivityRecognitionPermission(),
         LifeOsBridge.hasLocationPermissions(),
-        LifeOsBridge.hasNotificationListenerAccess(),
         LifeOsBridge.isHealthConnectAvailable(),
       ]);
       setSt({
@@ -51,7 +48,6 @@ export function PermissionsCard() {
         activity,
         fineLoc: loc.fine,
         bgLoc: loc.background,
-        notif,
         hcAvailable: hc,
       });
     } catch (e) {
@@ -119,13 +115,6 @@ export function PermissionsCard() {
         onAction={wrap('grant bg loc', async () => {
           await LifeOsBridge.requestBackgroundLocation();
         })}
-      />
-      <Row
-        title="Notification listener"
-        sub="incoming notif metadata, no content (Stage 3c)"
-        granted={st.notif}
-        actionLabel="Open settings"
-        onAction={wrap('open notif', () => LifeOsBridge.openNotificationListenerSettings())}
       />
       <Row
         title="Health Connect"

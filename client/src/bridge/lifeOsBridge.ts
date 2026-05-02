@@ -38,10 +38,6 @@ type LifeOsBridgeNative = {
     ts: number;
   }>;
 
-  // Stage 3c — NotificationListener.
-  hasNotificationListenerAccess(): Promise<boolean>;
-  openNotificationListenerSettings(): Promise<void>;
-
   // Stage 3d — Health Connect.
   isHealthConnectAvailable(): Promise<boolean>;
   openHealthConnect(): Promise<void>;
