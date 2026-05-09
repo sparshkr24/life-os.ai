@@ -38,7 +38,7 @@ All TypeScript application code for the Expo app. UI shell lives in `client/App.
 | `screens/index.ts` | Barrel re-exporting all screen components and `TabId`. |
 | `screens/shared.tsx` | Shared helpers + styles: `fmtTime`, `fmtDur`, `parseEvent`, `prettyPkg`, `safeJson`, `truncate`, `useAsyncRunner`, `makeStyles(theme)`, `NAV_CLEAR`, `TabId`. |
 | `screens/widgets.tsx` | Reusable UI atoms: `AppIcon` (brand glyph with letter fallback), `ScoreBar`, `Sparkline`, `SectionHeader`, `StatusDot`, `PressableScale`, `kindTint`. |
-| `screens/Today.tsx` | Hero screen. Productivity score, 7-day sparkline, sleep card, top-3 apps, today's nudges with thumbs ▲/▼, pending proactive question card. System debug card (collapsible). |
+| `screens/Today.tsx` | Hero screen. Productivity score, 7-day sparkline, sleep card, top-3 apps, today's nudges with thumbs ▲/▼, pending proactive question card. System debug card (collapsible). **Tracking pill** in the header reads `schema_meta.service_heartbeat_ts` (written every 60s by Kotlin) — green `live · Xs` / orange `idle` / red `stalled`; when not live, an inline **Restart** button calls `LifeOsBridge.startService()`. |
 | `screens/Observability.tsx` | 4-tab segmented strip (Events / Rollups / LLM / Nudges). |
 | `screens/EventsTable.tsx` | Infinite-scroll FlatList of raw events. Offset-based pagination with Set dedup. Calls `reopenDb()` on initial load. |
 | `screens/RollupsScreen.tsx` | Daily/Monthly rollup dashboard. Compact list tiles; tap opens `RollupDetailSheet` (bottom sheet, slide-up animation, drag-to-dismiss). Hero score with deltas, sleep, steps, top apps, time-split stacked bar, predictive insights. |

@@ -31,6 +31,7 @@ class LifeOsForegroundService : Service() {
   private val handler = Handler(Looper.getMainLooper())
   private var lastPollMs: Long = 0L
   private var lastHcPollMs: Long = 0L
+  private var serviceStartMs: Long = 0L
   // Last package we saw a RESUMED for. Used for implicit-close-on-switch:
   // when RESUMED fires for app B, we close any still-open session for A.
   // PAUSED/STOPPED events are flaky on swipe-from-recents and screen-off,
@@ -77,6 +78,19 @@ class LifeOsForegroundService : Service() {
         maybeKickAggregator()
       } catch (e: Exception) {
         Log.e(TAG, "aggregator kick failed", e)
+      }
+      // Heartbeat: record liveness so the watchdog alarm can detect when
+      // we've stopped polling. Written every tick (60s) regardless of
+      // whether anything was collected — what matters is that we ran.
+      try {
+        writeHeartbeat(now)
+      } catch (e: Exception) {
+        Log.e(TAG, "heartbeat write failed", e)
+      }
+      try {
+        updateForegroundNotification(now)
+      } catch (e: Exception) {
+        Log.w(TAG, "notif update failed: ${e.message}")
       }
       handler.postDelayed(this, POLL_INTERVAL_MS)
     }
@@ -148,6 +162,62 @@ class LifeOsForegroundService : Service() {
 
     // Stage 8: schedule the daily 03:05 nightly kicker. Idempotent.
     NightlyAlarmReceiver.schedule(this)
+
+    // Reliability: schedule a 15-min watchdog alarm. If our 60s poll
+    // dies (OEM kill, JVM crash on restart, etc) the watchdog detects
+    // the stale heartbeat and restarts us — even if the app is closed.
+    // Idempotent: re-scheduling overwrites the prior PendingIntent.
+    WatchdogAlarmReceiver.schedule(this)
+
+    // Initial heartbeat so the very first watchdog tick (15 min away)
+    // doesn't immediately flag us as dead during a slow startup.
+    val nowMs = System.currentTimeMillis()
+    serviceStartMs = nowMs
+    try {
+      writeMeta("service_start_ts", nowMs.toString())
+      writeMeta("service_heartbeat_ts", nowMs.toString())
+    } catch (e: Exception) {
+      Log.w(TAG, "initial heartbeat failed: ${e.message}")
+    }
+  }
+
+  private fun writeHeartbeat(nowMs: Long) {
+    writeMeta("service_heartbeat_ts", nowMs.toString())
+  }
+
+  private fun writeMeta(key: String, value: String) {
+    val db = openLifeOsDb() ?: return
+    try {
+      db.execSQL(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES(?, ?)",
+        arrayOf<Any>(key, value),
+      )
+    } finally {
+      try { db.close() } catch (_: Exception) {}
+    }
+  }
+
+  private fun updateForegroundNotification(nowMs: Long) {
+    val text = if (lastPollMs == 0L) "Starting…" else "Active · uptime ${formatUptime(nowMs)}"
+    val notif: Notification = Notification.Builder(this, CHANNEL_ID)
+      .setContentTitle("Life OS")
+      .setContentText(text)
+      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+      .setOngoing(true)
+      .setOnlyAlertOnce(true)
+      .build()
+    val nm = getSystemService(NotificationManager::class.java)
+    nm.notify(NOTIF_ID, notif)
+  }
+
+  private fun formatUptime(nowMs: Long): String {
+    if (serviceStartMs <= 0L) return "?"
+    val sec = (nowMs - serviceStartMs) / 1000L
+    if (sec < 60L) return "${sec}s"
+    val min = sec / 60L
+    if (min < 60L) return "${min}m"
+    val hr = min / 60L
+    return "${hr}h"
   }
 
   private fun hasActivityRecognitionPermission(): Boolean {

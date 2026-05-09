@@ -115,6 +115,7 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
   const [profile, setProfile] = useState<BehaviorProfileRow | null>(null);
   const [agg, setAgg] = useState<{ registered: boolean; lastTickTs: number | null } | null>(null);
   const [svc, setSvc] = useState<{ totalEvents: number; eventsLastHour: number; lastInsertTs: number } | null>(null);
+  const [heartbeatTs, setHeartbeatTs] = useState<number | null>(null);
   const [nightly, setNightly] = useState<number | null>(null);
   const [rollup, setRollup] = useState<ParsedRollup | null>(null);
   const [scoreHistory, setScoreHistory] = useState<(number | null)[]>([]);
@@ -158,6 +159,13 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
             eventsLastHour: st.eventsLastHour,
             lastInsertTs: st.lastInsertTs,
           });
+        const hbRow = await withDb((db) =>
+          db.getFirstAsync<{ value: string } | null>(
+            `SELECT value FROM schema_meta WHERE key = ?`,
+            ['service_heartbeat_ts'],
+          ),
+        );
+        setHeartbeatTs(hbRow?.value ? Number(hbRow.value) : null);
         setNightly(await lastNightlyTs());
         setRollup(latest ? parseRollup(latest.data, latest.productivity_score, latest.date) : null);
         setScoreHistory(history.map((h) => (h.score == null ? null : Math.round(h.score * 100))));
@@ -183,12 +191,18 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
   }, []);
 
   const svcHealth = useMemo(() => {
-    if (!svc || svc.lastInsertTs === 0) return { label: 'no data', color: theme.warn };
-    const ageMs = Date.now() - svc.lastInsertTs;
-    if (ageMs < 5 * 60_000) return { label: 'live', color: theme.ok };
-    if (ageMs < 30 * 60_000) return { label: 'idle', color: theme.warn };
-    return { label: 'stalled', color: theme.err };
-  }, [svc, theme]);
+    // Prefer the Kotlin service heartbeat (written every 60s regardless of
+    // whether any user event was collected) over event freshness — the
+    // service is alive while you sleep, even though no app_fg rows are
+    // being written. Fall back to lastInsertTs only if the heartbeat
+    // column is missing (older builds).
+    const ts = heartbeatTs ?? (svc?.lastInsertTs ?? 0);
+    if (!ts) return { label: 'no data', color: theme.warn, ageMs: -1 };
+    const ageMs = Date.now() - ts;
+    if (ageMs < 3 * 60_000) return { label: 'live', color: theme.ok, ageMs };
+    if (ageMs < 15 * 60_000) return { label: 'idle', color: theme.warn, ageMs };
+    return { label: 'stalled', color: theme.err, ageMs };
+  }, [heartbeatTs, svc, theme]);
 
   const score = rollup?.productivity_score_pct;
   const present = scoreHistory.filter((v): v is number => typeof v === 'number');
@@ -217,20 +231,45 @@ export function TodayScreen({ onTab }: { onTab: (t: TabId) => void }) {
           marginBottom: 4,
         }}>
         <Text style={[s.label, { color: theme.textMuted }]}>{dateLabel}</Text>
-        <View
-          style={{
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 6,
-            backgroundColor: theme.chipBg,
-            paddingHorizontal: 10,
-            paddingVertical: 5,
-            borderRadius: 999,
-          }}>
-          <StatusDot color={svcHealth.color} glow={svcHealth.label === 'live'} />
-          <Text style={[s.tdMonoSm, { color: svcHealth.color, fontWeight: '700' }]}>
-            {svcHealth.label}
-          </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              backgroundColor: theme.chipBg,
+              paddingHorizontal: 10,
+              paddingVertical: 5,
+              borderRadius: 999,
+            }}>
+            <StatusDot color={svcHealth.color} glow={svcHealth.label === 'live'} />
+            <Text style={[s.tdMonoSm, { color: svcHealth.color, fontWeight: '700' }]}>
+              {svcHealth.label === 'live' && svcHealth.ageMs >= 0
+                ? `live · ${Math.round(svcHealth.ageMs / 1000)}s`
+                : svcHealth.label}
+            </Text>
+          </View>
+          {svcHealth.label !== 'live' && (
+            <Pressable
+              onPress={async () => {
+                toast.info('restart service…');
+                await run('restart service', async () => {
+                  if (LifeOsBridge) await LifeOsBridge.startService();
+                });
+                await new Promise((res) => setTimeout(res, 4000));
+                await refresh();
+              }}
+              style={{
+                backgroundColor: theme.err + '22',
+                borderWidth: 1,
+                borderColor: theme.err,
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 999,
+              }}>
+              <Text style={[s.tdMonoSm, { color: theme.err, fontWeight: '700' }]}>Restart</Text>
+            </Pressable>
+          )}
         </View>
       </View>
 

@@ -75,5 +75,8 @@
     <receiver android:name=".GeofenceReceiver" android:exported="false"/>
     <!-- Stage 8: daily 03:05 kicker -->
     <receiver android:name=".NightlyAlarmReceiver" android:exported="false"/>
+    <!-- Reliability: 15-min watchdog that detects a dead FG service and
+         restarts it (or alerts the user if restart fails). -->
+    <receiver android:name=".WatchdogAlarmReceiver" android:exported="false"/>
   </application>
 </manifest>

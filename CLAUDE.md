@@ -45,6 +45,7 @@ Migrations are **additive only** via `addColumnIfMissing`. Never DROP or RENAME 
 |---|---|
 | Kotlin foreground service (24/7 collection) | Done |
 | Boot receiver (survives reboots) | Done |
+| Service liveness: 60s heartbeat + 15-min `WatchdogAlarmReceiver` + Today restart button | Done |
 | UsageStats, ActivityRecognition, Sleep, Geofencing, Health Connect | Done |
 | 15-min aggregator (clean → silence → rollup → score → rules → watchdog) | Done |
 | Productivity score (deterministic SQL, 5-component) | Done |
