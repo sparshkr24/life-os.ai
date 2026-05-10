@@ -41,6 +41,8 @@ object PhoneState {
   private const val TAG = "LifeOsPhoneState"
 
   @Volatile var placeId: String? = null
+  /** App context, captured during init. Used by background helpers (PlaceDetector) that need a Context after the originating receiver returned. */
+  @Volatile var appContext: Context? = null
   @Volatile private var batteryPct: Int = -1
   @Volatile private var isCharging: Boolean = false
   /** "wifi" | "cell" | "none" | "unknown" */
@@ -54,6 +56,7 @@ object PhoneState {
   fun init(ctx: Context) {
     if (initialized) return
     val app = ctx.applicationContext
+    appContext = app
     initialized = true
     audioManager = app.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     registerBattery(app)

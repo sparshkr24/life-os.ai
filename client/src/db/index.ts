@@ -329,6 +329,12 @@ async function runMigrate(): Promise<number> {
     await addColumnIfMissing(db, 'rules', 'based_on_memory_ids', 'TEXT');
     await addColumnIfMissing(db, 'rules', 'disabled_reason', 'TEXT');
     await addColumnIfMissing(db, 'rules', 'last_refined_ts', 'INTEGER');
+    // v8 \u2014 places extensions for auto-detection / ignored zones.
+    await addColumnIfMissing(db, 'places', 'kind', "TEXT NOT NULL DEFAULT 'manual'");
+    await addColumnIfMissing(db, 'places', 'confidence', 'REAL');
+    await addColumnIfMissing(db, 'places', 'category', 'TEXT');
+    await addColumnIfMissing(db, 'places', 'created_ts', 'INTEGER');
+    await addColumnIfMissing(db, 'places', 'last_visit_ts', 'INTEGER');
     if (currentVersion < SCHEMA_VERSION) {
       await db.runAsync(
         `INSERT INTO schema_meta (key, value) VALUES ('version', ?)

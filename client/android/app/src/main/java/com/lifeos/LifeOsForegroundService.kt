@@ -7,8 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.database.sqlite.SQLiteDatabase
@@ -32,6 +34,7 @@ class LifeOsForegroundService : Service() {
   private var lastPollMs: Long = 0L
   private var lastHcPollMs: Long = 0L
   private var serviceStartMs: Long = 0L
+  private var screenStateReceiver: BroadcastReceiver? = null
   // Last package we saw a RESUMED for. Used for implicit-close-on-switch:
   // when RESUMED fires for app B, we close any still-open session for A.
   // PAUSED/STOPPED events are flaky on swipe-from-recents and screen-off,
@@ -169,6 +172,27 @@ class LifeOsForegroundService : Service() {
     // Idempotent: re-scheduling overwrites the prior PendingIntent.
     WatchdogAlarmReceiver.schedule(this)
 
+    // Screen on/off: ACTION_SCREEN_ON/OFF can only be caught by a
+    // runtime-registered receiver (manifest receivers are ignored by the
+    // system for these actions). Unregistered in onDestroy.
+    screenStateReceiver = object : BroadcastReceiver() {
+      override fun onReceive(context: Context, intent: Intent) {
+        val kind = when (intent.action) {
+          Intent.ACTION_SCREEN_ON  -> "screen_on"
+          Intent.ACTION_SCREEN_OFF -> "screen_off"
+          else -> return
+        }
+        val now = System.currentTimeMillis()
+        EventDb.insert(context, kind, now, """{"source":"system_broadcast"}""")
+        Log.i(TAG, "screen: $kind")
+      }
+    }
+    val screenFilter = IntentFilter().apply {
+      addAction(Intent.ACTION_SCREEN_ON)
+      addAction(Intent.ACTION_SCREEN_OFF)
+    }
+    registerReceiver(screenStateReceiver, screenFilter)
+
     // Initial heartbeat so the very first watchdog tick (15 min away)
     // doesn't immediately flag us as dead during a slow startup.
     val nowMs = System.currentTimeMillis()
@@ -302,6 +326,11 @@ class LifeOsForegroundService : Service() {
 
   override fun onDestroy() {
     handler.removeCallbacks(pollTask)
+    PlaceDetector.shutdown()
+    screenStateReceiver?.let {
+      try { unregisterReceiver(it) } catch (e: Exception) { Log.w(TAG, "screen receiver unreg: ${e.message}") }
+      screenStateReceiver = null
+    }
     try {
       StepCounterCollector.stop()
     } catch (e: Exception) {

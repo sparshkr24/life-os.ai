@@ -20,6 +20,8 @@
  */
 import type * as SQLite from 'expo-sqlite';
 import { withDb, purgeShortAppFg } from '../db';
+import { BRAIN_EXCLUDED_KINDS } from '../brain/rawEvents';
+import { closeOrphanedOpenPlaceVisits } from '../geocode/geocodeWorker';
 
 /**
  * Packages we never want in `events`. Kotlin already filters most of these
@@ -85,6 +87,8 @@ export interface CleanupReport {
   noiseDeleted: number;
   shortDeleted: number;
   merged: number;
+  classBDeleted: number;
+  orphanedClosed: number;
   durationMs: number;
 }
 
@@ -93,21 +97,25 @@ export async function cleanupRawEvents(): Promise<CleanupReport> {
   let noiseDeleted = 0;
   let shortDeleted = 0;
   let merged = 0;
+  let classBDeleted = 0;
+  let orphanedClosed = 0;
 
   await withDb(async (db) => {
     noiseDeleted = await purgeNoisePkgs(db);
     merged = await mergeAdjacentAppFg(db);
     shortDeleted = await purgeShortAppFg(db, SHORT_THRESHOLD_MS);
+    classBDeleted = await purgeClassBOlderThan7Days(db);
+    orphanedClosed = await closeOrphanedOpenPlaceVisits(db, t0);
   });
 
   const dt = Date.now() - t0;
-  if (noiseDeleted + merged + shortDeleted > 0) {
+  if (noiseDeleted + merged + shortDeleted + classBDeleted + orphanedClosed > 0) {
     console.log(
       `[ingest] cleanup noise=${noiseDeleted} merged=${merged} ` +
-        `short=${shortDeleted} in ${dt}ms`,
+        `short=${shortDeleted} classB=${classBDeleted} orphPlace=${orphanedClosed} in ${dt}ms`,
     );
   }
-  return { noiseDeleted, shortDeleted, merged, durationMs: dt };
+  return { noiseDeleted, shortDeleted, merged, classBDeleted, orphanedClosed, durationMs: dt };
 }
 
 async function purgeNoisePkgs(db: SQLite.SQLiteDatabase): Promise<number> {
@@ -180,4 +188,19 @@ async function mergeAdjacentAppFg(db: SQLite.SQLiteDatabase): Promise<number> {
     }
   }
   return merged;
+}
+
+/**
+ * Class B events (screen_on/off, steps, heart_rate) are aggregate-only.
+ * Once the aggregator has rolled them up into daily_rollup.data we don't
+ * need the raw rows — cap retention at 7 days so they don't bloat the DB.
+ */
+async function purgeClassBOlderThan7Days(db: SQLite.SQLiteDatabase): Promise<number> {
+  const cutoff = Date.now() - 7 * 24 * 3600_000;
+  const placeholders = BRAIN_EXCLUDED_KINDS.map(() => '?').join(',');
+  const r = await db.runAsync(
+    `DELETE FROM events WHERE kind IN (${placeholders}) AND ts < ?`,
+    [...BRAIN_EXCLUDED_KINDS, cutoff],
+  );
+  return r.changes;
 }

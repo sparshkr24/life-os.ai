@@ -26,10 +26,11 @@ import {
   addPlace,
   deletePlace,
   listPlaces,
+  setPlaceKind,
   updatePlaceRadius,
   PLACES_DEFAULT_RADIUS_M,
 } from '../repos/places';
-import type { PlaceRow } from '../db/schema';
+import type { PlaceKind, PlaceRow } from '../db/schema';
 import { useTheme } from '../theme';
 import { useToast } from '../toast';
 import { ActionButton, makeStyles, useAsyncRunner } from './shared';
@@ -141,6 +142,19 @@ export function PlacesScreen({ onBack }: { onBack: () => void }) {
     }
   };
 
+  const onToggleIgnore = async (place: PlaceRow) => {
+    const next: PlaceKind = place.kind === 'ignored' ? 'manual' : 'ignored';
+    const ok = await run('toggle ignored', async () => {
+      await setPlaceKind(place.id, next);
+      return true;
+    });
+    if (ok) {
+      toast.ok(next === 'ignored' ? 'Ignored — events will not be written' : 'No longer ignored');
+      setEditing(null);
+      await refresh();
+    }
+  };
+
   return (
     <ScrollView contentContainerStyle={s.body}>
       <Pressable onPress={onBack} hitSlop={10} style={{ marginBottom: 4 }}>
@@ -191,9 +205,13 @@ export function PlacesScreen({ onBack }: { onBack: () => void }) {
                 justifyContent: 'space-between',
               }}>
               <View style={{ flex: 1 }}>
-                <Text style={[s.body2, { fontWeight: '700' }]}>{p.label}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[s.body2, { fontWeight: '700' }]}>{p.label}</Text>
+                  <PlaceKindBadge kind={p.kind} />
+                </View>
                 <Text style={[s.tdMonoSm, { color: theme.textMuted, marginTop: 2 }]}>
                   {p.lat.toFixed(5)}, {p.lng.toFixed(5)} · {p.radius_m} m
+                  {p.category ? ` · ${p.category}` : ''}
                 </Text>
               </View>
               <Text style={[s.tdMono, { color: theme.accent, fontWeight: '700' }]}>Edit →</Text>
@@ -288,6 +306,13 @@ export function PlacesScreen({ onBack }: { onBack: () => void }) {
                 style={{ flex: 1 }}
               />
             </View>
+            <Pressable
+              onPress={() => editing && onToggleIgnore(editing)}
+              style={[s.btnSecondary, { marginTop: 8 }]}>
+              <Text style={s.btnText}>
+                {editing?.kind === 'ignored' ? 'Stop ignoring' : 'Ignore (no events written)'}
+              </Text>
+            </Pressable>
             <Pressable onPress={() => setEditing(null)} style={{ marginTop: 10 }}>
               <Text style={[s.body2, { color: theme.textMuted, textAlign: 'center' }]}>
                 Close
@@ -297,6 +322,26 @@ export function PlacesScreen({ onBack }: { onBack: () => void }) {
         </View>
       </Modal>
     </ScrollView>
+  );
+}
+
+function PlaceKindBadge({ kind }: { kind: PlaceKind }) {
+  const { theme } = useTheme();
+  if (kind === 'manual') return null;
+  const bg = kind === 'ignored' ? theme.err : theme.accent;
+  const label = kind === 'auto' ? 'AUTO' : 'IGNORED';
+  return (
+    <View
+      style={{
+        backgroundColor: bg,
+        paddingHorizontal: 6,
+        paddingVertical: 1,
+        borderRadius: 4,
+      }}>
+      <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700', letterSpacing: 0.5 }}>
+        {label}
+      </Text>
+    </View>
   );
 }
 

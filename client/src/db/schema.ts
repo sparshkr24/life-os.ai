@@ -110,13 +110,34 @@ export const PHONE_SCHEMA_SQL: readonly string[] = [
   );`,
   `CREATE INDEX IF NOT EXISTS idx_llm_calls_ts ON llm_calls(ts);`,
 
-  // places (Home, Office, Gym, ...).
+  // places (Home, Office, Gym, ...) plus auto-detected venues + ignored zones.
+  // `kind` distinguishes 'manual' (user-named), 'auto' (geocoded by Nominatim,
+  // confidence ≥ 0.6), and 'ignored' (geofenced solely to suppress dwell
+  // detection — e.g. parents' building, transit routes; never produces
+  // place_visit events). Geofence is registered for all kinds so we always
+  // know when the user is inside.
   `CREATE TABLE IF NOT EXISTS places (
     id TEXT PRIMARY KEY,
     label TEXT NOT NULL,
     lat REAL NOT NULL,
     lng REAL NOT NULL,
     radius_m INTEGER NOT NULL
+  );`,
+
+  // Reverse-geocode cache. Key is (round(lat*10000), round(lng*10000)) which
+  // is ~11m resolution — small enough that the same coffee shop hits the
+  // same row on repeat visits, big enough that GPS jitter doesn't multiply
+  // entries. 24h TTL via cached_ts. We never call Nominatim twice for the
+  // same coords within a day.
+  `CREATE TABLE IF NOT EXISTS geocode_cache (
+    lat_q INTEGER NOT NULL,
+    lng_q INTEGER NOT NULL,
+    name TEXT,
+    category TEXT,
+    confidence REAL,
+    raw_response TEXT,
+    cached_ts INTEGER NOT NULL,
+    PRIMARY KEY (lat_q, lng_q)
   );`,
 
   // app classification.
@@ -217,7 +238,12 @@ export type EventKind =
   // v7: a proactive AI question was fired. Payload mirrors `proactive_questions`.
   | 'ai_question'
   // v7: user replied to a proactive question. Payload: {question_id, answer}.
-  | 'ai_question_response';
+  | 'ai_question_response'
+  // v8: confirmed dwell at an unknown spot, reverse-geocoded asynchronously.
+  // Payload: {arrival_ts, departure_ts, lat, lng, name, category, confidence,
+  //           status: 'pending_geocode' | 'geocoded' | 'failed' | 'ignored',
+  //           place_id?: string}.
+  | 'place_visit';
 
 export type AppCategory = 'productive' | 'neutral' | 'unproductive';
 
@@ -334,12 +360,32 @@ export interface AppCategoryRow {
   details: string | null;
 }
 
+export type PlaceKind = 'manual' | 'auto' | 'ignored';
+
 export interface PlaceRow {
   id: string;
   label: string;
   lat: number;
   lng: number;
   radius_m: number;
+  /** v8: 'manual' (user), 'auto' (Nominatim), 'ignored' (suppress detection). */
+  kind: PlaceKind;
+  /** Geocoder confidence (0..1) for auto places; null otherwise. */
+  confidence: number | null;
+  /** Coarse vocabulary: cafe, restaurant, shop_alcohol, gym, ... */
+  category: string | null;
+  created_ts: number | null;
+  last_visit_ts: number | null;
+}
+
+export interface GeocodeCacheRow {
+  lat_q: number;
+  lng_q: number;
+  name: string | null;
+  category: string | null;
+  confidence: number | null;
+  raw_response: string | null;
+  cached_ts: number;
 }
 
 // v7 — proactive AI questions.

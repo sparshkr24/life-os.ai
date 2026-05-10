@@ -27,6 +27,9 @@ class ActivityTransitionReceiver : BroadcastReceiver() {
         """{"activity":"$typeName","direction":"$direction","source":"activity_recognition"}"""
       EventDb.insert(ctx, "activity", nowMs, payload)
       Log.i(TAG, "transition $direction $typeName")
+      // Drive the dwell detector. STILL/enter outside any geofence starts
+      // a candidate dwell; any other transition cancels it.
+      PlaceDetector.onActivityTransition(ctx, typeName, direction)
     }
   }
 

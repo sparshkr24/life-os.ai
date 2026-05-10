@@ -56,6 +56,14 @@ export interface DailyRollupData {
   wake_first_app: string | null;
   first_pickup_min_after_wake: number | null;
   screen_on_minutes: number;
+  /** Epoch ms of first screen_on after a ≥4h dark gap — real wake-up time. */
+  wake_ts: number | null;
+  /** Epoch ms of last screen_on before a ≥2h dark gap — real bedtime. */
+  bedtime_ts: number | null;
+  /** Total screen_on events for the day. */
+  screen_on_count: number;
+  /** screen_on events with no app_fg within 5s — phantom checks (no intent). */
+  phantom_check_count: number;
   by_app: AppAgg[];
   by_category: Record<AppCategory, number>;
   by_hour: Record<string, Partial<Record<AppCategory, number>>>;
@@ -96,6 +104,7 @@ export async function rebuildDailyRollup(
   const nudges = await aggNudges(db, dayStart, dayEnd);
   const silences = await aggSilences(db, dayStart, dayEnd);
   const screenOnMin = apps.reduce((s, a) => s + a.minutes, 0);
+  const screenEvents = await aggScreenEvents(db, dayStart, dayEnd, apps);
 
   const data: DailyRollupData = {
     date,
@@ -103,6 +112,10 @@ export async function rebuildDailyRollup(
     wake_first_app: wake.firstApp,
     first_pickup_min_after_wake: wake.minAfterWake,
     screen_on_minutes: screenOnMin,
+    wake_ts: screenEvents.wake_ts,
+    bedtime_ts: screenEvents.bedtime_ts,
+    screen_on_count: screenEvents.screen_on_count,
+    phantom_check_count: screenEvents.phantom_check_count,
     by_app: apps,
     by_category: byCategory,
     by_hour: byHour,
@@ -493,6 +506,118 @@ async function aggSilences(
     }
   }
   return out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Screen on/off (Class B — aggregate only, not sent to LLM raw)
+// ────────────────────────────────────────────────────────────────────────────
+
+interface ScreenEventAgg {
+  wake_ts: number | null;
+  bedtime_ts: number | null;
+  screen_on_count: number;
+  phantom_check_count: number;
+}
+
+/**
+ * Derive real wake/bedtime from screen_on/off events.
+ *
+ * wake_ts    — first screen_on that follows ≥4h of screen darkness (the user
+ *              actually woke up, not a 3am notification check).
+ * bedtime_ts — last screen_on before a ≥2h gap of darkness (or end of day).
+ * phantom_check_count — screen_on with no app_fg event within 5s after it
+ *              (the user turned the screen on but didn't open anything — a
+ *              glance, time check, or notification dismiss).
+ */
+async function aggScreenEvents(
+  db: SQLite.SQLiteDatabase,
+  dayStart: number,
+  dayEnd: number,
+  apps: AppAgg[],
+): Promise<ScreenEventAgg> {
+  const screenRows = await db.getAllAsync<{ ts: number; kind: string }>(
+    `SELECT ts, kind FROM events
+     WHERE kind IN ('screen_on','screen_off') AND ts >= ? AND ts < ?
+     ORDER BY ts ASC`,
+    [dayStart, dayEnd],
+  );
+
+  const screenOnTs: number[] = screenRows
+    .filter((r) => r.kind === 'screen_on')
+    .map((r) => r.ts);
+
+  const screen_on_count = screenOnTs.length;
+  if (screen_on_count === 0) {
+    return { wake_ts: null, bedtime_ts: null, screen_on_count: 0, phantom_check_count: 0 };
+  }
+
+  // Build an ordered list of all screen events to find dark gaps.
+  // Each entry: { ts, kind }. We need to find gaps between screen_off and
+  // the next screen_on (or dayStart → first screen_on for the day-start gap).
+  const WAKE_GAP_MS = 4 * 3600_000;  // ≥4h dark → real wake-up
+  const BED_GAP_MS  = 2 * 3600_000;  // ≥2h dark after last on → bedtime
+
+  // Find wake_ts: first screen_on after a gap ≥4h.
+  // The gap before the first screen_on of the day = screen_on[0] - (dayStart - 4h window)
+  // We anchor on "was the screen dark for ≥4h before this on?".
+  let wake_ts: number | null = null;
+  let lastOffTs = dayStart - WAKE_GAP_MS; // assume dark before day started
+
+  for (const r of screenRows) {
+    if (r.kind === 'screen_on') {
+      const gapMs = r.ts - lastOffTs;
+      if (gapMs >= WAKE_GAP_MS && wake_ts === null) {
+        wake_ts = r.ts;
+      }
+    } else {
+      lastOffTs = r.ts;
+    }
+  }
+
+  // Find bedtime_ts: last screen_on before a dark gap ≥2h (or end of day).
+  let bedtime_ts: number | null = null;
+  // Walk backwards: find the last screen_on where the next darkness is ≥2h long.
+  // dayEnd is the implicit "screen off" at midnight.
+  const nextScreenOff = new Map<number, number>(); // screen_on ts → next screen_off ts
+  let nextOff = dayEnd;
+  for (let i = screenRows.length - 1; i >= 0; i--) {
+    const r = screenRows[i];
+    if (r.kind === 'screen_off') {
+      nextOff = r.ts;
+    } else {
+      nextScreenOff.set(r.ts, nextOff);
+    }
+  }
+  for (const onTs of [...screenOnTs].reverse()) {
+    const offTs = nextScreenOff.get(onTs) ?? dayEnd;
+    const darkUntil = screenRows.find((r) => r.kind === 'screen_on' && r.ts > offTs)?.ts ?? dayEnd;
+    const gapMs = darkUntil - offTs;
+    if (gapMs >= BED_GAP_MS) {
+      bedtime_ts = onTs;
+      break;
+    }
+  }
+
+  // Phantom checks: screen_on with no app_fg within 5s after it.
+  // Load app_fg start_ts values for today to check proximity.
+  const appFgTs = await db.getAllAsync<{ start_ts: number }>(
+    `SELECT CAST(json_extract(payload, '$.start_ts') AS INTEGER) AS start_ts
+     FROM events
+     WHERE kind = 'app_fg' AND ts >= ? AND ts < ?`,
+    [dayStart, dayEnd],
+  );
+  const appFgSet = new Set(appFgTs.map((r) => r.start_ts));
+
+  const PHANTOM_WINDOW_MS = 5_000;
+  let phantom_check_count = 0;
+  for (const onTs of screenOnTs) {
+    const hasApp = appFgTs.some((r) => r.start_ts >= onTs && r.start_ts < onTs + PHANTOM_WINDOW_MS);
+    if (!hasApp) phantom_check_count++;
+  }
+  // appFgSet is used above via appFgTs.some — suppress unused-var warning
+  void appFgSet;
+
+  return { wake_ts, bedtime_ts, screen_on_count, phantom_check_count };
 }
 
 export { prevDate, nextDate };

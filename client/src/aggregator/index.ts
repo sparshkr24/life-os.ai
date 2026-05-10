@@ -22,6 +22,7 @@ import { classifySilences } from './silence';
 import { foldMonth } from './monthlyFold';
 import { runRulesOnceFromBackground } from '../rules/worker';
 import { maybeRunNightlyWatchdog } from '../brain/nightly';
+import { processPendingPlaceVisits } from '../geocode/geocodeWorker';
 import { deviceTz, localDateStr, localMonthStr, prevDate } from './time';
 
 const META_KEY_LAST_FOLD = 'last_monthly_fold_date';
@@ -86,6 +87,18 @@ export async function runAggregatorTick(): Promise<TickReport> {
       } catch (e) {
         console.error(
           '[aggregator] proactive crashed:',
+          e instanceof Error ? e.message : String(e),
+        );
+      }
+
+      // Reverse-geocode any pending place_visit rows. Bounded (≤5 per
+      // tick, 1 req/sec to Nominatim) and silently no-ops when the queue
+      // is empty.
+      try {
+        await processPendingPlaceVisits();
+      } catch (e) {
+        console.error(
+          '[aggregator] geocode-worker crashed:',
           e instanceof Error ? e.message : String(e),
         );
       }

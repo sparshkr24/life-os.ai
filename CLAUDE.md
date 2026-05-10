@@ -27,7 +27,7 @@ Full design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — ground truth. Do n
 | `client/src/llm/` | Provider-agnostic LLM dispatch: router, key store, model catalogue, adapters | yes |
 | `client/src/memory/` | Memory store: embeddings, RAG, scoring, maintenance | yes |
 | `client/android/app/src/main/java/com/lifeos/` | Kotlin foreground service + bridge + boot receiver | yes |
-| `docs/` | Architecture + design docs | no (prose only) |
+| `docs/` | Architecture + design docs + active product/engineering plan ([docs/CLAUDE.md](docs/CLAUDE.md)) | yes |
 
 `server/` does not exist and must not be recreated. All state lives in `<filesDir>/SQLite/lifeos.db`.
 
@@ -60,6 +60,7 @@ Migrations are **additive only** via `addColumnIfMissing`. Never DROP or RENAME 
 | Chat (tool-calling, RAG-injected, read-only SQLite views) | Done |
 | Proactive questions (3 detectors, interactive notifications, answer→memory) | Done |
 | Places manager (GPS capture, radius editing, geofence sync) | Done |
+| Auto-place pipeline (Nominatim reverse-geocode + auto/manual/ignored kinds + per-install UA) | Done |
 | UI: Today, Observe, Chat, Settings, Profile, AiModels, Places | Done |
 | **Backups + retention sweeps** | **Not started** |
 | **Prediction accuracy dashboard** | **Not started** |

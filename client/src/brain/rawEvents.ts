@@ -25,6 +25,23 @@ import { deviceTz, localDayStartMs, nextDate } from '../aggregator/time';
 export const MAX_EVENTS_FOR_MEMORY = 2000;
 const APP_FG_DROP_THRESHOLD_MS = 30_000;
 
+/**
+ * Event kinds that are aggregate-only (Class B). The nightly memory pass
+ * must never see raw rows of these kinds — they are high-volume, low-signal
+ * individually, and their meaning is fully captured in daily_rollup.data
+ * (screen_on_count, wake_ts, bedtime_ts, steps, etc).
+ *
+ * Add new Class B kinds here. The aggregator retention sweep uses the same
+ * list to cap retention at 7 days for these rows.
+ */
+export const BRAIN_EXCLUDED_KINDS: readonly string[] = [
+  'screen_on',
+  'screen_off',
+  // steps intentionally excluded: timing of steps matters for the LLM
+  // (morning commute vs evening walk). Keep at normal 30-day retention.
+  'heart_rate',
+];
+
 export interface RawEventTimeline {
   date: string;
   totalEvents: number;
@@ -48,8 +65,9 @@ export async function loadRawEventsForDate(date: string): Promise<RawEventTimeli
     db.getAllAsync<Row>(
       `SELECT ts, kind, payload FROM events
        WHERE ts >= ? AND ts < ?
+         AND kind NOT IN (${BRAIN_EXCLUDED_KINDS.map(() => '?').join(',')})
        ORDER BY ts ASC`,
-      [startMs, endMs],
+      [startMs, endMs, ...BRAIN_EXCLUDED_KINDS],
     ),
   );
 
